@@ -2,7 +2,7 @@
 
 轻量级、可扩展的个人 AI 助手框架。
 
-> 对外项目名和 CLI 统一使用 **FeiBot / `feibot`**。
+> 本项目基于 `nanobot` 演进而来（origin: https://github.com/HKUDS/nanobot），并针对 Feishu-only 场景做了定制与简化。
 
 ## 快速开始
 
