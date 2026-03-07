@@ -1,0 +1,153 @@
+"""Cron tool for scheduling reminders and tasks."""
+
+from contextvars import ContextVar
+from typing import Any
+
+from feibot.agent.tools.base import Tool
+from feibot.cron.service import CronService
+from feibot.cron.types import CronSchedule
+
+
+class CronTool(Tool):
+    """Tool to schedule reminders and recurring tasks."""
+
+    def __init__(self, cron_service: CronService):
+        self._cron = cron_service
+        self._channel_ctx: ContextVar[str] = ContextVar("cron_channel", default="")
+        self._chat_id_ctx: ContextVar[str] = ContextVar("cron_chat_id", default="")
+
+    def set_context(self, channel: str, chat_id: str) -> None:
+        """Set the current session context for delivery."""
+        self._channel_ctx.set(channel)
+        self._chat_id_ctx.set(chat_id)
+
+    @property
+    def name(self) -> str:
+        return "cron"
+
+    @property
+    def description(self) -> str:
+        return "Schedule reminders and recurring tasks. Actions: add, list, remove."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "remove"],
+                    "description": "Action to perform",
+                },
+                "message": {"type": "string", "description": "Reminder message (for add)"},
+                "every_seconds": {
+                    "type": "integer",
+                    "description": "Interval in seconds (for recurring tasks)",
+                },
+                "cron_expr": {
+                    "type": "string",
+                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)",
+                },
+                "tz": {
+                    "type": "string",
+                    "description": "IANA timezone for cron expressions (e.g. 'America/Vancouver')",
+                },
+                "at": {
+                    "type": "string",
+                    "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
+                },
+                "job_id": {"type": "string", "description": "Job ID (for remove)"},
+            },
+            "required": ["action"],
+        }
+
+    async def execute(
+        self,
+        action: str,
+        message: str = "",
+        every_seconds: int | None = None,
+        cron_expr: str | None = None,
+        tz: str | None = None,
+        at: str | None = None,
+        job_id: str | None = None,
+        **kwargs: Any,
+    ) -> str:
+        if action == "add":
+            return self._add_job(message, every_seconds, cron_expr, tz, at)
+        if action == "list":
+            return self._list_jobs()
+        if action == "remove":
+            return self._remove_job(job_id)
+        return f"Unknown action: {action}"
+
+    def _add_job(
+        self,
+        message: str,
+        every_seconds: int | None,
+        cron_expr: str | None,
+        tz: str | None,
+        at: str | None,
+    ) -> str:
+        if not message:
+            return "Error: message is required for add"
+        channel = self._channel_ctx.get()
+        chat_id = self._chat_id_ctx.get()
+        if not channel or not chat_id:
+            return "Error: no session context (channel/chat_id)"
+        if tz and not cron_expr:
+            return "Error: tz can only be used with cron_expr"
+        if tz:
+            from zoneinfo import ZoneInfo
+
+            try:
+                ZoneInfo(tz)
+            except (KeyError, Exception):
+                return f"Error: unknown timezone '{tz}'"
+
+        # Build schedule
+        delete_after = False
+        if every_seconds:
+            schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
+        elif cron_expr:
+            schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
+        elif at:
+            from datetime import datetime
+
+            try:
+                dt = datetime.fromisoformat(at)
+            except ValueError:
+                return f"Error: invalid ISO datetime format '{at}'. Expected format: YYYY-MM-DDTHH:MM:SS"
+            at_ms = int(dt.timestamp() * 1000)
+            schedule = CronSchedule(kind="at", at_ms=at_ms)
+            delete_after = True
+        else:
+            return "Error: either every_seconds, cron_expr, or at is required"
+
+        job, status = self._cron.upsert_job(
+            name=message[:50],  # Increased from 30 to 50 chars
+            schedule=schedule,
+            message=message,
+            deliver=True,
+            channel=channel,
+            to=chat_id,
+            delete_after_run=delete_after,
+        )
+        if status == "created":
+            return f"Created job '{job.name}' (id: {job.id})"
+        if status == "updated":
+            return f"Updated existing job '{job.name}' (id: {job.id})"
+        return f"Job already exists '{job.name}' (id: {job.id})"
+
+    def _list_jobs(self) -> str:
+        jobs = self._cron.list_jobs()
+        if not jobs:
+            return "No scheduled jobs."
+        lines = [f"- {j.name} (id: {j.id}, {j.schedule.kind})" for j in jobs]
+        return "Scheduled jobs:\n" + "\n".join(lines)
+
+    def _remove_job(self, job_id: str | None) -> str:
+        if not job_id:
+            return "Error: job_id is required for remove"
+        if self._cron.remove_job(job_id):
+            return f"Removed job {job_id}"
+        return f"Job {job_id} not found"

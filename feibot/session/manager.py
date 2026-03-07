@@ -1,0 +1,247 @@
+"""Session management for conversation history."""
+
+import json
+from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from loguru import logger
+
+from feibot.utils.helpers import ensure_dir, safe_filename
+
+
+@dataclass
+class Session:
+    """
+    A conversation session.
+
+    Stores messages in JSONL format for easy reading and persistence.
+
+    Important: Messages are append-only for LLM cache efficiency.
+    The consolidation process writes summaries to MEMORY.md/HISTORY.md
+    but does NOT modify the messages list or get_history() output.
+    """
+
+    key: str  # channel:chat_id
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    last_consolidated: int = 0  # Number of messages already consolidated to files
+    
+    def add_message(self, role: str, content: str, **kwargs: Any) -> None:
+        """Add a message to the session."""
+        msg = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat(),
+            **kwargs
+        }
+        self.messages.append(msg)
+        self.updated_at = datetime.now()
+    
+    @staticmethod
+    def _is_history_slice_coherent(messages: list[dict[str, Any]]) -> bool:
+        """
+        Validate tool-call adjacency constraints required by strict providers.
+
+        This guards against truncation that keeps tool results but drops the
+        assistant message that introduced the corresponding tool_call_id.
+        """
+        declared_ids: set[str] = set()
+        pending_ids: set[str] | None = None
+
+        for m in messages:
+            role = m.get("role")
+
+            if role == "assistant" and m.get("tool_calls"):
+                if pending_ids:
+                    return False
+                ids = {
+                    str(tc.get("id"))
+                    for tc in (m.get("tool_calls") or [])
+                    if isinstance(tc, dict) and tc.get("id")
+                }
+                if not ids:
+                    return False
+                declared_ids.update(ids)
+                pending_ids = set(ids)
+                continue
+
+            if role == "tool":
+                tool_call_id = str(m.get("tool_call_id") or "")
+                if not tool_call_id:
+                    return False
+                if tool_call_id not in declared_ids:
+                    return False
+                if not pending_ids or tool_call_id not in pending_ids:
+                    return False
+                pending_ids.remove(tool_call_id)
+                if not pending_ids:
+                    pending_ids = None
+                continue
+
+            # Any non-tool message closes the tool call/result phase.
+            if pending_ids:
+                return False
+
+        return not pending_ids
+
+    @classmethod
+    def _trim_to_coherent_history(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop the smallest broken prefix caused by truncation."""
+        if cls._is_history_slice_coherent(messages):
+            return messages
+
+        for start in range(1, len(messages)):
+            candidate = messages[start:]
+            if cls._is_history_slice_coherent(candidate):
+                return candidate
+        return []
+
+    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+        """Get recent messages in LLM format, preserving key tool metadata."""
+        recent = self.messages[-max_messages:]
+        recent = self._trim_to_coherent_history(recent)
+
+        out: list[dict[str, Any]] = []
+        for m in recent:
+            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            for k in ("tool_calls", "tool_call_id", "name", "reasoning_content"):
+                if k in m:
+                    entry[k] = m[k]
+            out.append(entry)
+        return out
+    
+    def clear(self) -> None:
+        """Clear all messages and reset session to initial state."""
+        self.messages = []
+        self.last_consolidated = 0
+        self.updated_at = datetime.now()
+
+
+class SessionManager:
+    """
+    Manages conversation sessions.
+
+    Sessions are stored as JSONL files in the sessions directory.
+    """
+
+    def __init__(self, sessions_dir: Path):
+        self.sessions_dir = ensure_dir(sessions_dir)
+        self._cache: dict[str, Session] = {}
+    
+    def _get_session_path(self, key: str) -> Path:
+        """Get the file path for a session."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.sessions_dir / f"{safe_key}.jsonl"
+    
+    def get_or_create(self, key: str) -> Session:
+        """
+        Get an existing session or create a new one.
+        
+        Args:
+            key: Session key (usually channel:chat_id).
+        
+        Returns:
+            The session.
+        """
+        if key in self._cache:
+            return self._cache[key]
+        
+        session = self._load(key)
+        if session is None:
+            session = Session(key=key)
+        
+        self._cache[key] = session
+        return session
+    
+    def _load(self, key: str) -> Session | None:
+        """Load a session from disk."""
+        path = self._get_session_path(key)
+
+        if not path.exists():
+            return None
+
+        try:
+            messages = []
+            metadata = {}
+            created_at = None
+            last_consolidated = 0
+
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    data = json.loads(line)
+
+                    if data.get("_type") == "metadata":
+                        metadata = data.get("metadata", {})
+                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        last_consolidated = data.get("last_consolidated", 0)
+                    else:
+                        messages.append(data)
+
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at or datetime.now(),
+                metadata=metadata,
+                last_consolidated=last_consolidated
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load session {key}: {e}")
+            return None
+    
+    def save(self, session: Session) -> None:
+        """Save a session to disk."""
+        path = self._get_session_path(session.key)
+
+        with open(path, "w") as f:
+            metadata_line = {
+                "_type": "metadata",
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+                "metadata": session.metadata,
+                "last_consolidated": session.last_consolidated
+            }
+            f.write(json.dumps(metadata_line) + "\n")
+            for msg in session.messages:
+                f.write(json.dumps(msg) + "\n")
+
+        self._cache[session.key] = session
+    
+    def invalidate(self, key: str) -> None:
+        """Remove a session from the in-memory cache."""
+        self._cache.pop(key, None)
+    
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """
+        List all sessions.
+        
+        Returns:
+            List of session info dicts.
+        """
+        sessions = []
+        
+        for path in self.sessions_dir.glob("*.jsonl"):
+            try:
+                # Read just the metadata line
+                with open(path) as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        data = json.loads(first_line)
+                        if data.get("_type") == "metadata":
+                            sessions.append({
+                                "key": path.stem.replace("_", ":"),
+                                "created_at": data.get("created_at"),
+                                "updated_at": data.get("updated_at"),
+                                "path": str(path)
+                            })
+            except Exception:
+                continue
+        
+        return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)

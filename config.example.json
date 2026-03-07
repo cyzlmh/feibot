@@ -1,0 +1,88 @@
+{
+  "name": "<name>",
+  "paths": {
+    "workspace": "./workspace",
+    "sessions": "./sessions"
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.5",
+      "fallbackModel": "MiniMax-M2.1",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 20,
+      "memoryWindow": 50,
+      "llmPolicy": {
+        "retry": {
+          "maxRetries": 4,
+          "baseDelaySec": 0.75,
+          "maxDelaySec": 8.0,
+          "retryableStatusCodes": [408, 409, 429, 500, 502, 503, 504]
+        },
+        "fallback": {
+          "enabled": true,
+          "retryableErrorsOnly": true
+        }
+      }
+    }
+  },
+  "providers": {
+    "minimax": {
+      "apiKey": "<MINIMAX_API_KEY>",
+      "apiBase": "https://api.minimaxi.com/v1",
+      "extraHeaders": null
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "<FEISHU_APP_ID>",
+      "appSecret": "<FEISHU_APP_SECRET>",
+      "encryptKey": "",
+      "verificationToken": "",
+      "wikiSpaceId": "",
+      "wikiParentNodeToken": "",
+      "docWriteAutoChunkThresholdChars": 6000,
+      "allowFrom": [
+        "<FEISHU_USER_OPEN_ID>"
+      ]
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "<TAVILY_API_KEY>",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 300,
+      "pathAppend": "",
+      "approvalEnabled": true,
+      "approvalMode": "text",
+      "approvalHardDangerMode": "",
+      "approvalTimeoutSec": 120,
+      "approvalApprovers": [],
+      "approvalSimAuthUrl": "",
+      "approvalSimAuthApiKey": "",
+      "approvalSimAuthTimeoutSec": 90,
+      "approvalSimAuthExtraHeaders": {},
+      "approvalSimAuthHost": "",
+      "approvalSimAuthSendAuthPath": "/trustedAuth/api/simAuth/sendAuth",
+      "approvalSimAuthGetResultPath": "/trustedAuth/api/simAuth/getSimAuthResult",
+      "approvalSimAuthApId": "",
+      "approvalSimAuthAppId": "",
+      "approvalSimAuthPrivateKey": "",
+      "approvalSimAuthMsisdn": "",
+      "approvalSimAuthTemplateId": "",
+      "approvalSimAuthCallbackUrl": "",
+      "approvalSimAuthCallbackTimeoutSec": 65,
+      "approvalSimAuthPollIntervalSec": 2.0,
+      "approvalSimAuthPollTimeoutSec": 65,
+      "approvalSimAuthCallbackListenHost": "",
+      "approvalSimAuthCallbackListenPort": 0,
+      "approvalSimAuthCallbackPath": "/callback"
+    },
+    "restrictToWorkspace": true
+  }
+}

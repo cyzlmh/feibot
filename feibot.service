@@ -1,0 +1,14 @@
+[Unit]
+Description=feibot gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/feibot
+ExecStart=/root/.local/bin/uv run feibot --config /opt/feibot/config.json gateway
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

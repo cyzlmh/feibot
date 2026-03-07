@@ -1,0 +1,4 @@
+interface:
+  display_name: "feibot Ops"
+  short_description: "Manage feibot launchd lifecycle safely"
+  default_prompt: "Use $feibot-ops to manage feibot launchd lifecycle, autostart, and logs."
