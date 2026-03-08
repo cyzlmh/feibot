@@ -31,7 +31,8 @@
       "apiKey": "<MINIMAX_API_KEY>",
       "apiBase": "https://api.minimaxi.com/v1",
       "extraHeaders": null
-    }
+    },
+    "openaiCodex": {}
   },
   "channels": {
     "feishu": {

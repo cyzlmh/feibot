@@ -200,25 +200,37 @@ def _load_runtime_config() -> tuple[Path, Config, Path, Path]:
 
 
 def _make_provider(config, config_path: Path):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+    """Create the configured provider from config."""
     from feibot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
+    from feibot.providers.openai_codex_provider import OpenAICodexProvider
+
     model = (config.agents.defaults.model or "").strip()
     if not model:
         console.print(f"[red]Error: Model is required in config ({config_path}).[/red]")
         raise typer.Exit(1)
-    if not (p and p.api_key) and not model.startswith("bedrock/"):
+
+    provider_name = config.get_provider_name(model)
+    p = config.get_provider(model)
+
+    # OpenAI Codex (OAuth)
+    if provider_name == "openai_codex" or model.startswith("openai-codex/") or model.startswith("openai_codex/"):
+        return OpenAICodexProvider(default_model=model)
+
+    from feibot.providers.registry import find_by_name
+    spec = find_by_name(provider_name) if provider_name else None
+    if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
         console.print("[red]Error: No API key configured.[/red]")
         console.print(f"Set one in {config_path} under providers section")
         raise typer.Exit(1)
+
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
+        api_base=config.get_api_base(model),
         default_model=model,
         fallback_model=config.agents.defaults.fallback_model,
         llm_policy=config.agents.defaults.llm_policy,
         extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
+        provider_name=provider_name,
     )
 
 
@@ -802,6 +814,55 @@ def cron_run(
             _print_agent_response(result_holder[0], render_markdown=True)
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
+
+
+# ============================================================================
+# OAuth Login
+# ============================================================================
+
+
+provider_app = typer.Typer(help="Manage providers")
+app.add_typer(provider_app, name="provider")
+
+
+@provider_app.command("login")
+def provider_login(
+    provider: str = typer.Argument(..., help="OAuth provider (e.g. 'openai-codex')"),
+):
+    """Authenticate with an OAuth provider."""
+    if provider not in {"openai-codex", "openai_codex"}:
+        console.print(f"[red]Unknown OAuth provider: {provider}[/red]  Supported: openai-codex")
+        raise typer.Exit(1)
+
+    console.print(f"{__logo__} OAuth Login - OpenAI Codex\\n")
+    _login_openai_codex()
+
+
+def _login_openai_codex() -> None:
+    try:
+        from oauth_cli_kit import get_token, login_oauth_interactive
+    except ImportError:
+        console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
+        raise typer.Exit(1) from None
+
+    token = None
+    try:
+        token = get_token()
+    except Exception:
+        pass
+
+    if not (token and token.access):
+        console.print("[cyan]Starting interactive OAuth login...[/cyan]\\n")
+        token = login_oauth_interactive(
+            print_fn=lambda s: console.print(s),
+            prompt_fn=lambda s: typer.prompt(s),
+        )
+
+    if not (token and token.access):
+        console.print("[red]✗ Authentication failed[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]")
 
 
 if __name__ == "__main__":
