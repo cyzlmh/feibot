@@ -226,7 +226,9 @@ class SpawnTool(Tool):
             slug = "subtask"
         slug = slug[:18].strip("-") or "subtask"
         suffix = datetime.now().strftime("%H%M")
-        name = f"feibot-{slug}-{suffix}"
+        # Use agent name from config instead of hardcoded "feibot"
+        agent_name = getattr(self._manager, "agent_name", None) or "feibot"
+        name = f"{agent_name}-{slug}-{suffix}"
         return name[:30]
 
     async def _feishu_get_tenant_token(self, client: httpx.AsyncClient) -> str:

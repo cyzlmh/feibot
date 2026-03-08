@@ -44,7 +44,7 @@
       "wikiParentNodeToken": "",
       "docWriteAutoChunkThresholdChars": 6000,
       "allowFrom": [
-        "<FEISHU_USER_OPEN_ID>"
+        "<FEISHU_USER_OPEN_ID>:<PHONE_NUMBER>"
       ]
     }
   },
@@ -73,7 +73,6 @@
       "approvalSimAuthApId": "",
       "approvalSimAuthAppId": "",
       "approvalSimAuthPrivateKey": "",
-      "approvalSimAuthMsisdn": "",
       "approvalSimAuthTemplateId": "",
       "approvalSimAuthCallbackUrl": "",
       "approvalSimAuthCallbackTimeoutSec": 65,

@@ -47,6 +47,7 @@ from feibot.agent.tools.spawn import SpawnTool
 from feibot.agent.tools.web import WebFetchTool, WebSearchTool
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
+from feibot.channels.allow_from import extract_allow_from_msisdn_map, extract_allow_from_open_ids
 from feibot.providers.base import LLMProvider
 from feibot.session.channel_log import ChannelLogStore, LogEntry
 from feibot.session.manager import Session, SessionManager
@@ -119,6 +120,7 @@ class AgentLoop:
         "/new — Start a new conversation\n"
         "/stop — Stop the current task\n"
         "/help — Show available commands\n"
+        "/chatid — Show your user/chat IDs\n"
         "/sp [label] — Open a Feishu subtask group chat"
     )
     _MISLEADING_SUCCESS_REASONS = {
@@ -150,6 +152,7 @@ class AgentLoop:
         allowed_dirs: list[str] | None = None,
         session_manager: SessionManager | None = None,
         debug: bool = False,
+        agent_name: str = "feibot",
     ):
         from feibot.config.schema import ExecToolConfig
 
@@ -168,10 +171,14 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.allowed_dirs = allowed_dirs
         self.debug = debug
+        self.agent_name = agent_name
         self.exec_approvals = ExecApprovalManager(
             enabled=bool(getattr(self.exec_config, "approval_enabled", True)),
             timeout_sec=int(getattr(self.exec_config, "approval_timeout_sec", 120) or 120),
             approvers=list(getattr(self.exec_config, "approval_approvers", []) or []),
+        )
+        allow_from_entries = (
+            list(getattr(self.feishu_config, "allow_from", []) or []) if self.feishu_config else []
         )
         self.sim_auth_resolver = SimAuthResolver(
             verify_url=str(getattr(self.exec_config, "approval_sim_auth_url", "") or "").strip(),
@@ -190,7 +197,7 @@ class AgentLoop:
             cmcc_private_key=str(
                 getattr(self.exec_config, "approval_sim_auth_private_key", "") or ""
             ).strip(),
-            cmcc_msisdn=str(getattr(self.exec_config, "approval_sim_auth_msisdn", "") or "").strip(),
+            cmcc_msisdn_map=extract_allow_from_msisdn_map(allow_from_entries),
             cmcc_template_id=str(
                 getattr(self.exec_config, "approval_sim_auth_template_id", "") or ""
             ).strip(),
@@ -231,6 +238,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            agent_name=self.agent_name,
         )
 
         self._running = False
@@ -276,7 +284,9 @@ class AgentLoop:
         fs_cfg = self.feishu_config
         default_receive_id = ""
         if fs_cfg and getattr(fs_cfg, "allow_from", None):
-            default_receive_id = fs_cfg.allow_from[0]
+            allow_from_ids = extract_allow_from_open_ids(list(getattr(fs_cfg, "allow_from", []) or []))
+            if allow_from_ids:
+                default_receive_id = allow_from_ids[0]
 
         # Message tool
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
@@ -517,11 +527,22 @@ class AgentLoop:
         if mode == "sim_auth" and not self.sim_auth_resolver.enabled:
             if not self._sim_auth_warned_missing_config:
                 logger.warning(
-                    "Exec approval mode is sim_auth but approval_sim_auth_url is empty; falling back to text approval."
+                    "Exec approval mode is sim_auth but SIM-auth config is incomplete; falling back to manual approval."
                 )
                 self._sim_auth_warned_missing_config = True
-            return "text"
+            return "feishu_card" if channel == "feishu" else "text"
         return mode
+
+    def _should_fallback_to_feishu_hitl(self, request: ExecApprovalRequest) -> bool:
+        if request.channel != "feishu":
+            return False
+        mode = self._approval_mode(
+            request.channel,
+            risk_level=str(request.risk_level or "confirm"),
+        )
+        if mode != "sim_auth":
+            return False
+        return not self.sim_auth_resolver.can_verify_request(request)
 
     def _build_exec_approval_card(self, request: ExecApprovalRequest) -> dict[str, Any]:
         command_block = self._format_command_as_markdown(request.command)
@@ -618,16 +639,21 @@ class AgentLoop:
             return
 
     def _is_feishu_card_approval_enabled(self, request: ExecApprovalRequest) -> bool:
-        return self._approval_mode(
+        mode = self._approval_mode(
             request.channel,
             risk_level=str(request.risk_level or "confirm"),
-        ) == "feishu_card"
+        )
+        if mode == "feishu_card":
+            return True
+        return self._should_fallback_to_feishu_hitl(request)
 
     def _is_sim_auth_approval_enabled(self, request: ExecApprovalRequest) -> bool:
-        return self._approval_mode(
+        if self._approval_mode(
             request.channel,
             risk_level=str(request.risk_level or "confirm"),
-        ) == "sim_auth"
+        ) != "sim_auth":
+            return False
+        return self.sim_auth_resolver.can_verify_request(request)
 
     def _capture_exec_approval_continuation(
         self,
@@ -1060,12 +1086,12 @@ class AgentLoop:
                 preview = compact[:60] + "…" if len(compact) > 60 else compact
                 preview = preview.replace('"', "'")
                 if preview_key:
-                    hints.append(f'{tc.name}({preview_key}="{preview}")')
+                    hints.append(f'**{tc.name}** • {preview_key}: `{preview}`')
                 else:
-                    hints.append(f'{tc.name}("{preview}")')
+                    hints.append(f'**{tc.name}** • `{preview}`')
             else:
-                hints.append(tc.name)
-        return ", ".join(hints)
+                hints.append(f'**{tc.name}**')
+        return "\n".join(f"{i+1}. {hint}" for i, hint in enumerate(hints))
 
     @classmethod
     def _extract_file_refs_from_content(cls, content: str | None) -> list[str]:
@@ -1926,6 +1952,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self.COMMANDS_HELP_TEXT,
             )
+        if cmd == "/chatid":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"User ID: `{msg.sender_id}`\nChat ID: `{msg.chat_id}`",
+            )
         if cmd == "/sp":
             spawn_tool = self.tools.get("spawn")
             if not isinstance(spawn_tool, SpawnTool):
@@ -2035,7 +2067,14 @@ class AgentLoop:
             )
 
         debug_log: list[dict[str, Any]] | None = [] if self.debug else None
-        if msg_type in {"text", "post"} and cmd not in {"/new", "/stop", "/help", "/sp", "/approve"}:
+        if msg_type in {"text", "post"} and cmd not in {
+            "/new",
+            "/stop",
+            "/help",
+            "/chatid",
+            "/sp",
+            "/approve",
+        }:
             pending_files = self._pop_pending_files(session)
             effective_content = self._append_file_refs_to_goal(effective_content, pending_files)
         initial_messages = self.context.build_messages(

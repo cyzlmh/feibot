@@ -143,3 +143,22 @@ async def test_new_command_with_mention_prefix_resets_session(monkeypatch, tmp_p
     assert resp.content == "New session started."
     session = loop.sessions.get_or_create("feishu:oc_group_1")
     assert session.messages == []
+
+
+@pytest.mark.asyncio
+async def test_chatid_command_returns_sender_and_chat_ids(tmp_path):
+    loop = _make_loop(tmp_path)
+
+    resp = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_test",
+            chat_id="oc_group_1",
+            content="@_user_1 /chatid",
+            metadata={"msg_type": "text", "message_id": "om_chatid_1"},
+        )
+    )
+
+    assert resp is not None
+    assert "ou_test" in resp.content
+    assert "oc_group_1" in resp.content

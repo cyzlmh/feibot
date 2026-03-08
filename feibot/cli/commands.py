@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from feibot import __logo__, __version__
+from feibot.channels.allow_from import extract_allow_from_open_ids
 from feibot.config.schema import Config
 from feibot.utils.helpers import sync_workspace_templates
 
@@ -273,6 +274,7 @@ def gateway(
         allowed_dirs=config.tools.allowed_dirs,
         session_manager=session_manager,
         debug=debug,
+        agent_name=config.name,
     )
 
     async def on_cron_job(job: CronJob) -> str | None:
@@ -372,7 +374,9 @@ def gateway(
 
         fs_cfg = config.channels.feishu
         if fs_cfg.enabled:
-            for candidate in getattr(fs_cfg, "allow_from", []) or []:
+            for candidate in extract_allow_from_open_ids(
+                list(getattr(fs_cfg, "allow_from", []) or [])
+            ):
                 chat_id = str(candidate).strip()
                 if chat_id:
                     return "feishu", chat_id
@@ -497,6 +501,7 @@ def agent(
         allowed_dirs=config.tools.allowed_dirs,
         session_manager=SessionManager(sessions),
         debug=debug,
+        agent_name=config.name,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -770,6 +775,7 @@ def cron_run(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         allowed_dirs=config.tools.allowed_dirs,
         session_manager=SessionManager(sessions),
+        agent_name=config.name,
     )
 
     result_holder: list[str | None] = []

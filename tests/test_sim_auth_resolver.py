@@ -13,7 +13,7 @@ _TEST_PRIVATE_KEY = (
 )
 
 
-def _make_request() -> ExecApprovalRequest:
+def _make_request(requester_id: str = "ou_test") -> ExecApprovalRequest:
     return ExecApprovalRequest(
         id="07951513db",
         command="rm -f /tmp/x",
@@ -21,7 +21,7 @@ def _make_request() -> ExecApprovalRequest:
         channel="feishu",
         chat_id="oc_test",
         session_key="feishu:oc_test",
-        requester_id="ou_test",
+        requester_id=requester_id,
         created_at=datetime.now(),
         expires_at=datetime.now() + timedelta(minutes=2),
     )
@@ -87,6 +87,52 @@ def test_sim_auth_approved_boolean_takes_priority() -> None:
     assert reason == "Manual override"
 
 
+def test_cmcc_enabled_with_requester_phone_mapping() -> None:
+    resolver = SimAuthResolver(
+        cmcc_host="https://ptest.cmccsim.com:9090",
+        cmcc_send_auth_path="/trustedAuth/api/simAuth/sendAuth",
+        cmcc_get_result_path="/trustedAuth/api/simAuth/getSimAuthResult",
+        cmcc_ap_id="A0003",
+        cmcc_app_id="A0003001",
+        cmcc_private_key=_TEST_PRIVATE_KEY,
+        cmcc_msisdn_map={"ou_test": "19802025093"},
+        cmcc_template_id="DF20240419093514451c32",
+    )
+    assert resolver.cmcc_enabled is True
+
+
+def test_cmcc_resolve_msisdn_uses_requester_mapping_only() -> None:
+    resolver = SimAuthResolver(
+        cmcc_msisdn_map={"ou_test": "19802025093"},
+    )
+    assert resolver._resolve_cmcc_msisdn(_make_request()) == "19802025093"
+    assert resolver._resolve_cmcc_msisdn(_make_request("ou_other")) == ""
+
+
+def test_cmcc_can_verify_request_requires_user_phone() -> None:
+    resolver = SimAuthResolver(
+        cmcc_host="https://ptest.cmccsim.com:9090",
+        cmcc_send_auth_path="/trustedAuth/api/simAuth/sendAuth",
+        cmcc_get_result_path="/trustedAuth/api/simAuth/getSimAuthResult",
+        cmcc_ap_id="A0003",
+        cmcc_app_id="A0003001",
+        cmcc_private_key=_TEST_PRIVATE_KEY,
+        cmcc_template_id="DF20240419093514451c32",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
+    )
+    assert resolver.can_verify_request(_make_request()) is True
+    assert resolver.can_verify_request(_make_request("ou_other")) is False
+
+
+def test_build_payload_includes_requester_phone() -> None:
+    resolver = SimAuthResolver(
+        verify_url="https://sim-auth.local/verify",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
+    )
+    payload = resolver._build_payload(_make_request())
+    assert payload["requester_phone"] == "19802025093"
+
+
 @pytest.mark.asyncio
 async def test_sim_auth_verify_surfaces_result_desc_when_decision_missing(monkeypatch) -> None:
     class _FakeResponse:
@@ -127,7 +173,7 @@ async def test_cmcc_verify_send_auth_then_poll_get_result(monkeypatch) -> None:
         cmcc_ap_id="A0003",
         cmcc_app_id="A0003001",
         cmcc_private_key=_TEST_PRIVATE_KEY,
-        cmcc_msisdn="19802025093",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
         cmcc_template_id="DF20240419093514451c32",
         cmcc_poll_interval_sec=0.01,
         cmcc_poll_timeout_sec=1,
@@ -159,7 +205,7 @@ async def test_cmcc_verify_poll_real_callback_result_shape(monkeypatch) -> None:
         cmcc_ap_id="A0003",
         cmcc_app_id="A0003001",
         cmcc_private_key=_TEST_PRIVATE_KEY,
-        cmcc_msisdn="19802025093",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
         cmcc_template_id="DF20240419093514451c32",
         cmcc_poll_interval_sec=0.01,
         cmcc_poll_timeout_sec=1,
@@ -191,7 +237,7 @@ async def test_cmcc_verify_timeout_returns_deny(monkeypatch) -> None:
         cmcc_ap_id="A0003",
         cmcc_app_id="A0003001",
         cmcc_private_key=_TEST_PRIVATE_KEY,
-        cmcc_msisdn="19802025093",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
         cmcc_template_id="DF20240419093514451c32",
         cmcc_poll_interval_sec=0.01,
         cmcc_poll_timeout_sec=1,
@@ -219,7 +265,7 @@ async def test_cmcc_verify_missing_task_id_returns_reason(monkeypatch) -> None:
         cmcc_ap_id="A0003",
         cmcc_app_id="A0003001",
         cmcc_private_key=_TEST_PRIVATE_KEY,
-        cmcc_msisdn="19802025093",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
         cmcc_template_id="DF20240419093514451c32",
     )
 
@@ -243,7 +289,7 @@ async def test_cmcc_verify_uses_callback_payload(monkeypatch) -> None:
         cmcc_ap_id="A0003",
         cmcc_app_id="A0003001",
         cmcc_private_key=_TEST_PRIVATE_KEY,
-        cmcc_msisdn="19802025093",
+        cmcc_msisdn_map={"ou_test": "19802025093"},
         cmcc_template_id="DF20240419093514451c32",
         cmcc_poll_interval_sec=0.01,
         cmcc_poll_timeout_sec=1,

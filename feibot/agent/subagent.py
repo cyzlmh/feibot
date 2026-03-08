@@ -38,6 +38,7 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         allowed_dirs: list[str] | None = None,
+        agent_name: str = "feibot",
     ):
         from feibot.config.schema import ExecToolConfig
 
@@ -51,6 +52,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.allowed_dirs = allowed_dirs or []
+        self.agent_name = agent_name
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}
 

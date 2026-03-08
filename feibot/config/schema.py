@@ -13,7 +13,7 @@ class FeishuConfig(BaseModel):
     app_secret: str = ""  # App Secret from Feishu Open Platform
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
-    allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
+    allow_from: list[str] = Field(default_factory=list)  # Allowed open_ids; supports "open_id:msisdn"
     wiki_space_id: str = ""  # Default enterprise wiki space ID for new docs
     wiki_parent_node_token: str = ""  # Optional default parent wiki node token
     doc_write_auto_chunk_threshold_chars: int = 6000  # 0 disables auto switch for write/append
@@ -124,7 +124,6 @@ class ExecToolConfig(BaseModel):
     approval_sim_auth_ap_id: str = ""
     approval_sim_auth_app_id: str = ""
     approval_sim_auth_private_key: str = ""
-    approval_sim_auth_msisdn: str = ""
     approval_sim_auth_template_id: str = ""
     approval_sim_auth_callback_url: str = ""
     approval_sim_auth_callback_timeout_sec: int = 65

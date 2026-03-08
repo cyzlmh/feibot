@@ -229,7 +229,7 @@ class SimAuthResolver:
         cmcc_ap_id: str = "",
         cmcc_app_id: str = "",
         cmcc_private_key: str = "",
-        cmcc_msisdn: str = "",
+        cmcc_msisdn_map: dict[str, str] | None = None,
         cmcc_template_id: str = "",
         cmcc_callback_url: str = "",
         cmcc_callback_timeout_sec: int = 65,
@@ -254,7 +254,11 @@ class SimAuthResolver:
         self.cmcc_ap_id = str(cmcc_ap_id or "").strip()
         self.cmcc_app_id = str(cmcc_app_id or "").strip()
         self.cmcc_private_key = str(cmcc_private_key or "").strip()
-        self.cmcc_msisdn = str(cmcc_msisdn or "").strip()
+        self.cmcc_msisdn_map = {
+            str(k).strip(): str(v).strip()
+            for k, v in (cmcc_msisdn_map or {}).items()
+            if str(k).strip() and str(v).strip()
+        }
         self.cmcc_template_id = str(cmcc_template_id or "").strip()
         self.cmcc_callback_url = str(cmcc_callback_url or "").strip()
         self.cmcc_callback_timeout_sec = max(0, int(cmcc_callback_timeout_sec or 0))
@@ -284,10 +288,15 @@ class SimAuthResolver:
             self.cmcc_ap_id,
             self.cmcc_app_id,
             self.cmcc_private_key,
-            self.cmcc_msisdn,
             self.cmcc_template_id,
         ]
         return all(bool(x) for x in required)
+
+    def can_verify_request(self, request: ExecApprovalRequest) -> bool:
+        """Whether SIM-auth can be executed for this approval request."""
+        if self.cmcc_enabled:
+            return bool(self._resolve_cmcc_msisdn(request))
+        return bool(self.verify_url)
 
     async def verify(self, request: ExecApprovalRequest) -> SimAuthDecision:
         """Resolve approval via CMCC flow first, otherwise generic verifier URL."""
@@ -346,7 +355,14 @@ class SimAuthResolver:
         self._callback_bridge.bind_loop(loop)
         self._ensure_callback_server_started()
 
-        send_resp = await self._cmcc_send_auth()
+        msisdn = self._resolve_cmcc_msisdn(request)
+        if not msisdn:
+            return SimAuthDecision(
+                decision="deny",
+                reason=f"CMCC SimAuth missing msisdn for requester {request.requester_id}.",
+            )
+
+        send_resp = await self._cmcc_send_auth(msisdn)
         if send_resp is None:
             return SimAuthDecision(decision="deny", reason="CMCC sendAuth request failed.")
 
@@ -414,9 +430,9 @@ class SimAuthResolver:
             timeout_reason = f"{timeout_reason} Last response: {last_reason}"
         return SimAuthDecision(decision="deny", reason=timeout_reason)
 
-    async def _cmcc_send_auth(self) -> dict[str, Any] | None:
+    async def _cmcc_send_auth(self, msisdn: str) -> dict[str, Any] | None:
         payload: dict[str, Any] = {
-            "msisdn": self.cmcc_msisdn,
+            "msisdn": msisdn,
             "templateId": self.cmcc_template_id,
             "templateParam": "TrustedAuth",
             "version": "1",
@@ -537,9 +553,8 @@ class SimAuthResolver:
                 pass
         self._callback_thread = None
 
-    @staticmethod
-    def _build_payload(request: ExecApprovalRequest) -> dict[str, Any]:
-        return {
+    def _build_payload(self, request: ExecApprovalRequest) -> dict[str, Any]:
+        payload = {
             "approval_id": request.id,
             "command": request.command,
             "working_dir": request.working_dir,
@@ -550,6 +565,29 @@ class SimAuthResolver:
             "created_at": request.created_at.isoformat(),
             "expires_at": request.expires_at.isoformat(),
         }
+        if msisdn := self._resolve_cmcc_msisdn(request):
+            payload["requester_phone"] = msisdn
+        return payload
+
+    def _resolve_cmcc_msisdn(self, request: ExecApprovalRequest) -> str:
+        for requester_token in self._split_sender_id_tokens(request.requester_id):
+            mapped = self.cmcc_msisdn_map.get(requester_token)
+            if mapped:
+                return mapped
+        return ""
+
+    @staticmethod
+    def _split_sender_id_tokens(raw: str | None) -> list[str]:
+        value = str(raw or "").strip()
+        if not value:
+            return []
+        tokens = [value]
+        if "|" in value:
+            for part in value.split("|"):
+                cleaned = part.strip()
+                if cleaned and cleaned not in tokens:
+                    tokens.append(cleaned)
+        return tokens
 
     @staticmethod
     def _extract_task_id(payload: dict[str, Any]) -> str:

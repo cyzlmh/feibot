@@ -230,6 +230,64 @@ async def test_exec_approval_sim_auth_auto_allow_resumes_loop(
 
 
 @pytest.mark.asyncio
+async def test_exec_approval_sim_auth_missing_phone_falls_back_to_feishu_hitl(
+    tmp_path: Path,
+) -> None:
+    bus = MessageBus()
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    target = workspace / "cleanup_sim_fallback.txt"
+    target.write_text("trash", encoding="utf-8")
+    command = f"rm -f {target}"
+
+    provider = ExecApprovalProvider(command)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(
+            approval_mode="sim_auth",
+            approval_sim_auth_host="https://ptest.cmccsim.com:9090",
+            approval_sim_auth_send_auth_path="/trustedAuth/api/simAuth/sendAuth",
+            approval_sim_auth_get_result_path="/trustedAuth/api/simAuth/getSimAuthResult",
+            approval_sim_auth_ap_id="A0003",
+            approval_sim_auth_app_id="A0003001",
+            approval_sim_auth_private_key="test-private-key",
+            approval_sim_auth_template_id="DF20240419093514451c32",
+        ),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content="Please clean temp file",
+            metadata={
+                "msg_type": "text",
+                "message_id": "om_exec_sim_fallback_1",
+                "_suppress_progress": True,
+            },
+        )
+    )
+
+    assert response is None
+    assert not loop._sim_auth_pending_ids
+    assert provider.calls == 1
+
+    card_prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    assert card_prompt.metadata is not None
+    assert card_prompt.metadata.get("_exec_approval_id")
+    assert isinstance(card_prompt.metadata.get("_feishu_card"), dict)
+    assert target.exists()
+
+
+@pytest.mark.asyncio
 async def test_exec_approval_sim_auth_auto_deny_stops_loop(monkeypatch, tmp_path: Path) -> None:
     bus = MessageBus()
     workspace = tmp_path / "ws"

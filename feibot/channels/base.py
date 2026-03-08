@@ -7,6 +7,7 @@ from loguru import logger
 
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
+from feibot.channels.allow_from import extract_allow_from_open_ids
 
 
 class BaseChannel(ABC):
@@ -69,18 +70,21 @@ class BaseChannel(ABC):
             True if allowed, False otherwise.
         """
         allow_list = getattr(self.config, "allow_from", [])
-        
+
         # If no allow list, allow everyone
         if not allow_list:
             return True
-        
+
+        allowed_ids = set(extract_allow_from_open_ids(list(allow_list)))
+        if not allowed_ids:
+            return False
+
         sender_str = str(sender_id)
-        if sender_str in allow_list:
-            return True
+        sender_tokens = {sender_str}
         if "|" in sender_str:
-            for part in sender_str.split("|"):
-                if part and part in allow_list:
-                    return True
+            sender_tokens.update(part.strip() for part in sender_str.split("|") if part.strip())
+        if sender_tokens & allowed_ids:
+            return True
         return False
     
     async def _handle_message(
