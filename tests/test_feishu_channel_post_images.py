@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from feibot.bus.events import OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.channels.feishu import FeishuChannel
 from feibot.config.schema import FeishuConfig
@@ -16,6 +17,56 @@ def _make_channel(tmp_path: Path) -> FeishuChannel:
         bus=MessageBus(),
         workspace_dir=tmp_path,
     )
+
+
+class _ReqBodyBuilder:
+    def __init__(self):
+        self.payload: dict[str, object] = {}
+
+    def receive_id(self, value: str):
+        self.payload["receive_id"] = value
+        return self
+
+    def msg_type(self, value: str):
+        self.payload["msg_type"] = value
+        return self
+
+    def content(self, value: str):
+        self.payload["content"] = value
+        return self
+
+    def build(self):
+        return dict(self.payload)
+
+
+class _ReqBuilder:
+    def __init__(self):
+        self.payload: dict[str, object] = {}
+
+    def receive_id_type(self, value: str):
+        self.payload["receive_id_type"] = value
+        return self
+
+    def request_body(self, value: dict[str, object]):
+        self.payload["request_body"] = value
+        return self
+
+    def build(self):
+        return dict(self.payload)
+
+
+class _SendResponse:
+    def __init__(self, ok: bool, *, code: int = 0, msg: str = "", log_id: str = ""):
+        self._ok = ok
+        self.code = code
+        self.msg = msg
+        self._log_id = log_id
+
+    def success(self) -> bool:
+        return self._ok
+
+    def get_log_id(self) -> str:
+        return self._log_id
 
 
 def test_extract_post_content_collects_text_and_image_keys(tmp_path: Path) -> None:
@@ -424,3 +475,139 @@ async def test_on_card_action_sync_routes_to_approve_command(monkeypatch, tmp_pa
     assert captured["metadata"]["approval_id"] == "abc123"
     assert captured["metadata"]["approval_decision"] == "allow-once"
     assert captured["metadata"]["source"] == "card_action"
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_plain_text_when_interactive_send_fails(monkeypatch, tmp_path: Path) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        if len(calls) == 1:
+            return _SendResponse(False, code=230001, msg="invalid card", log_id="log_card_1")
+        return _SendResponse(True, code=0, msg="ok", log_id="log_text_1")
+
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content="final answer from bot",
+        )
+    )
+
+    assert len(calls) == 2
+    first_body = calls[0]["request_body"]
+    second_body = calls[1]["request_body"]
+    assert isinstance(first_body, dict)
+    assert isinstance(second_body, dict)
+    assert first_body["msg_type"] == "interactive"
+    assert second_body["msg_type"] == "text"
+    payload = json.loads(str(second_body["content"]))
+    text = str(payload["text"])
+    assert "Delivery warning" in text
+    assert "code=230001" in text
+    assert "final answer from bot" in text
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_plain_text_when_interactive_send_raises(monkeypatch, tmp_path: Path) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        if len(calls) == 1:
+            raise RuntimeError("network timeout")
+        return _SendResponse(True, code=0, msg="ok", log_id="log_text_2")
+
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user_1",
+            content="answer after tool call",
+        )
+    )
+
+    assert len(calls) == 2
+    first_body = calls[0]["request_body"]
+    second_body = calls[1]["request_body"]
+    assert isinstance(first_body, dict)
+    assert isinstance(second_body, dict)
+    assert first_body["msg_type"] == "interactive"
+    assert second_body["msg_type"] == "text"
+    payload = json.loads(str(second_body["content"]))
+    text = str(payload["text"])
+    assert "Delivery warning" in text
+    assert "network timeout" in text
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_plain_text_when_post_send_fails(monkeypatch, tmp_path: Path) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        if len(calls) == 1:
+            return _SendResponse(False, code=230099, msg="post payload invalid", log_id="log_post_1")
+        return _SendResponse(True, code=0, msg="ok", log_id="log_text_3")
+
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content="line1\nline2",
+            metadata={"_feishu_msg_type": "post"},
+        )
+    )
+
+    assert len(calls) == 2
+    first_body = calls[0]["request_body"]
+    second_body = calls[1]["request_body"]
+    assert isinstance(first_body, dict)
+    assert isinstance(second_body, dict)
+    assert first_body["msg_type"] == "post"
+    assert second_body["msg_type"] == "text"
+    post_payload = json.loads(str(first_body["content"]))
+    assert isinstance(post_payload.get("zh_cn"), dict)
+    payload = json.loads(str(second_body["content"]))
+    text = str(payload["text"])
+    assert "Delivery warning" in text
+    assert "code=230099" in text

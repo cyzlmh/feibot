@@ -141,6 +141,7 @@ class ToolsConfig(BaseModel):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     allowed_dirs: list[str] = Field(default_factory=list)  # Additional directories that are allowed when restrict_to_workspace is True
+    disabled_tools: list[str] = Field(default_factory=list)  # List of tool names to disable (e.g., ["feishu_doc", "feishu_wiki"])
 
 
 class PathsConfig(BaseModel):

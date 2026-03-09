@@ -1,98 +1,55 @@
 ---
 name: feishu-doc
-description: "Operate Feishu DocX documents via the `feishu_doc` tool (create/read/list blocks/append/write/write_safe/get/update/delete block/insert_image). Use when the user wants to read or modify Feishu docs."
-metadata: {"feibot":{"emoji":"📄"}}
+description: Operate Feishu DocX documents including read, create, list blocks, get block, and update operations. Use when the user needs to read document content, create new documents, list document blocks, or manipulate DocX files in Feishu/Lark. Requires Feishu App ID and App Secret.
 ---
 
 # Feishu Doc Skill
 
-Use `feishu_doc` for Feishu DocX operations, including inserting local images into a document.
+Operate Feishu DocX documents via CLI script.
 
-## Workflow
+## Usage
 
-1. If the user wants a new document, call `feishu_doc` with `action=create` and only `title` unless they explicitly provide valid tokens.
-2. Prefer configured defaults for knowledge-base placement. Do not invent `wiki_space_id`, `wiki_parent_node_token`, or `folder_token`.
-3. **Important**: `write_safe` requires an existing `doc_token`. For new documents, always `create` first, then use `write_safe` to populate content.
-4. For full-document edits, prefer `write_safe` (single tool call with internal chunk+retry) when content is long or failure-prone; use `append`/`write` for shorter updates.
-5. For precise edits, call `list_blocks` first, then `get_block`, then `update_block` or `delete_block`.
-6. For Wiki links (`/wiki/...`), use `feishu_wiki` to resolve node details and get the underlying `obj_token` (DocX token) when needed.
-7. To insert an image into a DocX document, use `feishu_doc` `action=insert_image` with a local `image_path`.
-
-## Tool Call Examples
-
-Create a doc (uses configured Wiki defaults when available):
-
-```json
-{
-  "action": "create",
-  "title": "Weekly Notes"
-}
+```bash
+python scripts/feishu_doc.py --app-id <APP_ID> --app-secret <APP_SECRET> --action <ACTION> [options]
 ```
 
-Read a doc:
+## Actions
 
-```json
-{
-  "action": "read",
-  "url": "https://example.feishu.cn/docx/AbCdEf123"
-}
+| Action | Required Params | Description |
+|--------|-----------------|-------------|
+| `read` | `--doc-token` or `--url` | Read document content |
+| `list_blocks` | `--doc-token` or `--url` | List all blocks in document |
+| `get_block` | `--doc-token`, `--block-id` | Get specific block |
+| `create` | `--title` | Create new document |
+
+## Options
+
+- `--app-id`: Feishu App ID (required)
+- `--app-secret`: Feishu App Secret (required)
+- `--action`: Action to perform (required)
+- `--doc-token`: Document token
+- `--url`: DocX URL (alternative to doc-token)
+- `--title`: Document title (for create action)
+- `--content`: Content (for write/append actions)
+- `--block-id`: Block ID (for get/update/delete)
+- `--page-size`: Page size for list_blocks (default: 200)
+
+## Examples
+
+```bash
+# Read document
+python scripts/feishu_doc.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action read --doc-token "doxxx"
+
+# Create document
+python scripts/feishu_doc.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action create --title "My Document"
+
+# List blocks
+python scripts/feishu_doc.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action list_blocks --url "https://xxx.feishu.cn/docx/xxx"
 ```
 
-Append markdown:
+## Output
 
-```json
-{
-  "action": "append",
-  "doc_token": "AbCdEf123",
-  "content": "## Update\\n- Item A\\n- Item B"
-}
-```
-
-Safely replace a full document with internal chunking:
-
-```json
-{
-  "action": "write_safe",
-  "doc_token": "AbCdEf123",
-  "content": "## Full Report\\n...large markdown...",
-  "chunk_chars": 3000
-}
-```
-
-Insert a cached/local image into a DocX document:
-
-```json
-{
-  "action": "insert_image",
-  "doc_token": "AbCdEf123",
-  "image_path": "/absolute/path/to/image.jpg"
-}
-```
-
-Targeted block edit:
-
-```json
-{
-  "action": "list_blocks",
-  "doc_token": "AbCdEf123"
-}
-```
-
-```json
-{
-  "action": "update_block",
-  "doc_token": "AbCdEf123",
-  "block_id": "doxcnBlockId",
-  "content": "Rewritten line"
-}
-```
-
-## Troubleshooting
-
-- If credentials are missing, configure `channels.feishu.app_id` and `channels.feishu.app_secret`.
-- Do not use `feishu_send_file` to insert an image into a DocX document. `feishu_send_file` sends a chat attachment only.
-- If `create` fails with Wiki `not found` or `permission denied`, verify the configured Wiki node token, app scopes, and knowledge-base membership (`feishu_app_scopes` / `feishu_perm` can help).
-- `update_block` only updates text content; non-text blocks may fail.
-- `delete_block` expects a child `block_id`, not the document token (`doc_token`).
-- `write/append/write_safe` keeps markdown tables by default; if DocX validation still fails, reduce `chunk_chars` and retry with `write_safe`.
-- If full-document writes often fail due validation/rate-limit/revision issues, lower `chunk_chars` and prefer `write_safe`.
+All actions output JSON to stdout. Errors include an `error` field.

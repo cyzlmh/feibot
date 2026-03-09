@@ -1,74 +1,42 @@
 ---
 name: feishu-bitable
-description: "Operate Feishu Bitable via `feishu_bitable_*` tools (parse URL, inspect fields, list/get/create/update records, create app, create field). Use when the user wants the agent to read/write Feishu multi-dimensional tables."
-metadata: {"feibot":{"emoji":"🧮"}}
+description: Operate Feishu Bitable via CLI. Actions include get_meta, list_fields, list_records, get_record, create_record, update_record. Use when the user wants to read/write Feishu multi-dimensional tables.
 ---
 
 # Feishu Bitable Skill
 
-Use the `feishu_bitable_*` tools for Feishu Bitable operations.
+Operate Feishu multi-dimensional tables.
 
-## Recommended Order
+## Usage
 
-1. Start with `feishu_bitable_get_meta` when given a Feishu Bitable/base URL.
-2. Call `feishu_bitable_list_fields` before writing records to confirm field names and types.
-3. If a required column is missing, use `feishu_bitable_create_field` before writing records.
-4. Use `feishu_bitable_create_record` or `feishu_bitable_update_record`.
-5. Use `feishu_bitable_list_records` / `feishu_bitable_get_record` to verify results.
-
-## Wiki URL Caveat
-
-If the user provides a Wiki URL (`/wiki/...`), `feishu_bitable_get_meta` may not be able to extract `app_token` directly. Ask for:
-
-- a `/base/...` URL, or
-- explicit `app_token` and `table_id`
-
-## Tool Call Examples
-
-Parse a URL:
-
-```json
-{
-  "url": "https://example.feishu.cn/base/bascnABC123?table=tblXYZ789"
-}
+```bash
+python scripts/feishu_bitable.py --app-id <ID> --app-secret <SECRET> --action <ACTION>
 ```
 
-List fields:
+## Actions
 
-```json
-{
-  "app_token": "bascnABC123",
-  "table_id": "tblXYZ789"
-}
+| Action | Required | Description |
+|--------|----------|-------------|
+| `get_meta` | `--app-token` or `--url` | List tables in app |
+| `list_fields` | `--app-token`, `--table-id` | List table fields |
+| `list_records` | `--app-token`, `--table-id` | List records |
+| `get_record` | `--app-token`, `--table-id`, `--record-id` | Get single record |
+| `create_record` | `--app-token`, `--table-id`, `--fields` | Create record |
+| `update_record` | `--app-token`, `--table-id`, `--record-id`, `--fields` | Update record |
+
+## Examples
+
+```bash
+# Get tables from URL
+python scripts/feishu_bitable.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action get_meta --url "https://xxx.feishu.cn/base/xxx"
+
+# List records
+python scripts/feishu_bitable.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action list_records --app-token "xxx" --table-id "xxx"
+
+# Create record
+python scripts/feishu_bitable.py --app-id $APP_ID --app-secret $APP_SECRET \
+  --action create_record --app-token "xxx" --table-id "xxx" \
+  --fields '{"Name": "Test", "Status": "Done"}'
 ```
-
-Create a record:
-
-```json
-{
-  "app_token": "bascnABC123",
-  "table_id": "tblXYZ789",
-  "fields": {
-    "Title": "LLM created row",
-    "Status": "Todo"
-  }
-}
-```
-
-Update a record:
-
-```json
-{
-  "app_token": "bascnABC123",
-  "table_id": "tblXYZ789",
-  "record_id": "recn123",
-  "fields": {
-    "Status": "Done"
-  }
-}
-```
-
-## Troubleshooting
-
-- If API calls fail with permissions, check Feishu app scopes for Bitable/Drive.
-- "Row number" in the UI is not a stable API identifier; use `record_id`.

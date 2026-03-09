@@ -1,54 +1,37 @@
 ---
 name: feishu-wiki
-description: "Navigate Feishu knowledge bases via the `feishu_wiki` tool (spaces/nodes/get/create/move/rename). Use when the user mentions Wiki, knowledge base, or /wiki/ links."
-metadata: {"feibot":{"emoji":"📚"}}
+description: Navigate Feishu knowledge bases via CLI. Actions include spaces, nodes, get, create, move, rename. Use when the user mentions Wiki, knowledge base, or /wiki/ links.
 ---
 
 # Feishu Wiki Skill
 
-Use `feishu_wiki` for Feishu knowledge-base (Wiki) operations.
+Navigate Feishu knowledge bases.
 
-## Workflow
+## Usage
 
-1. If the user gives a Wiki URL, extract the `/wiki/<token>` value or pass the URL to `feishu_wiki` where supported.
-2. Use `action=get` to inspect a node and find `obj_type` / `obj_token`.
-3. Use `obj_token` with `feishu_doc` (for `docx`) or Bitable tools (for `bitable`) for content editing.
-4. Use `action=spaces` and `action=nodes` to discover valid `space_id` / `parent_node_token` instead of guessing tokens.
-5. Use `action=create` to create nodes inside a known Wiki space/parent.
-
-## Tool Call Examples
-
-List spaces:
-
-```json
-{
-  "action": "spaces"
-}
+```bash
+python scripts/feishu_wiki.py --app-id <ID> --app-secret <SECRET> --action <ACTION> [options]
 ```
 
-Get a Wiki node:
+## Actions
 
-```json
-{
-  "action": "get",
-  "url": "https://example.feishu.cn/wiki/JnYiwVERWiPzxQk6NbzcK6E3nje"
-}
+| Action | Required | Description |
+|--------|----------|-------------|
+| `spaces` | - | List all wiki spaces |
+| `nodes` | `--space-id` | List nodes in space |
+| `get` | `--token` or `--url` | Get node detail |
+
+## Options
+
+- `--app-id`, `--app-secret`: Credentials (required)
+- `--space-id`: Space ID
+- `--parent-node-token`: Parent node for listing
+- `--token`: Node token
+- `--url`: Wiki URL
+
+## Examples
+
+```bash
+python scripts/feishu_wiki.py --app-id $APP_ID --app-secret $APP_SECRET --action spaces
+python scripts/feishu_wiki.py --app-id $APP_ID --app-secret $APP_SECRET --action nodes --space-id 123
 ```
-
-Create a DocX page under a parent node:
-
-```json
-{
-  "action": "create",
-  "space_id": "7358544912177356801",
-  "parent_node_token": "wikcnParent123",
-  "title": "Project Notes",
-  "obj_type": "docx"
-}
-```
-
-## Troubleshooting
-
-- `code=131005 not found`: wrong `space_id` or `parent_node_token` (often a guessed token).
-- `code=131006 permission denied`: bot/app is not a Wiki member or lacks edit/admin access.
-- If the bot cannot be selected in the UI, grant access via a group and use `feishu_perm` to verify membership.

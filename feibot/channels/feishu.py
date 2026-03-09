@@ -355,23 +355,104 @@ class FeishuChannel(BaseChannel):
         payload.pop("fallback", None)
         return payload
 
+    def _send_message_sync(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> Any:
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type(msg_type)
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        return self._client.im.v1.message.create(request)
+
+    @staticmethod
+    def _response_log_id(response: Any) -> str | None:
+        getter = getattr(response, "get_log_id", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter()
+        except Exception:
+            return None
+        return str(value).strip() or None
+
+    @staticmethod
+    def _build_text_fallback_message(content: str, reason: str) -> str:
+        detail = str(reason or "unknown error").strip()
+        if len(detail) > 240:
+            detail = detail[:237].rstrip() + "..."
+
+        fallback = (
+            "[Delivery warning] Failed to send rich Feishu message. "
+            f"Reason: {detail}."
+        )
+
+        plain = str(content or "").strip()
+        if not plain:
+            return fallback
+        if len(plain) > 1600:
+            plain = plain[:1597].rstrip() + "..."
+        return f"{fallback}\n\nPlain-text fallback:\n{plain}"
+
+    @staticmethod
+    def _build_post_message_content(content: str) -> str:
+        text = str(content or "").strip()
+        if not text:
+            text = "(empty)"
+        rows: list[list[dict[str, str]]] = []
+        for line in text.splitlines():
+            part = line.strip()
+            if not part:
+                continue
+            rows.append([{"tag": "text", "text": part}])
+        if not rows:
+            rows = [[{"tag": "text", "text": text}]]
+        payload = {
+            "zh_cn": {
+                "title": "",
+                "content": rows,
+            }
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu."""
         if not self._client:
             logger.warning("Feishu client not initialized")
             return
+
+        chat_id = str(msg.chat_id or "").strip()
+        if not chat_id:
+            logger.warning("Feishu chat_id is empty; dropping outbound message")
+            return
+
+        receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
+        send_msg_type = "interactive"
         
         try:
-            # Determine receive_id_type based on chat_id format
-            # open_id starts with "ou_", chat_id starts with "oc_"
-            if msg.chat_id.startswith("oc_"):
-                receive_id_type = "chat_id"
-            else:
-                receive_id_type = "open_id"
-
-            custom_card = msg.metadata.get("_feishu_card") if isinstance(msg.metadata, dict) else None
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            custom_card = metadata.get("_feishu_card")
             if isinstance(custom_card, dict):
                 card = self._normalize_card_payload(custom_card)
+                content = json.dumps(card, ensure_ascii=False)
+            elif str(metadata.get("_feishu_msg_type") or "").strip().lower() == "post":
+                send_msg_type = "post"
+                content = self._build_post_message_content(msg.content)
+            elif str(metadata.get("_feishu_msg_type") or "").strip().lower() == "text":
+                send_msg_type = "text"
+                content = json.dumps({"text": str(msg.content or "")}, ensure_ascii=False)
             else:
                 # Build a simple markdown card to avoid unsupported legacy tags on JSON 2.0.
                 elements = self._build_card_elements(msg.content)
@@ -379,30 +460,62 @@ class FeishuChannel(BaseChannel):
                     "config": {"width_mode": "fill", "update_multi": True},
                     "body": {"elements": elements},
                 })
-            content = json.dumps(card, ensure_ascii=False)
-            
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(msg.chat_id)
-                    .msg_type("interactive")
-                    .content(content)
-                    .build()
-                ).build()
-            
-            response = self._client.im.v1.message.create(request)
-            
+                content = json.dumps(card, ensure_ascii=False)
+
+            response = self._send_message_sync(
+                receive_id_type=receive_id_type,
+                receive_id=chat_id,
+                msg_type=send_msg_type,
+                content=content,
+            )
+
             if not response.success():
+                log_id = self._response_log_id(response)
+                reason = f"code={response.code}, msg={response.msg}"
                 logger.error(
-                    f"Failed to send Feishu message: code={response.code}, "
-                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                    f"Failed to send Feishu {send_msg_type} message: code={response.code}, "
+                    f"msg={response.msg}, log_id={log_id}"
                 )
+                if send_msg_type == "text":
+                    return
+                fallback_text = self._build_text_fallback_message(msg.content, reason)
+                fallback_content = json.dumps({"text": fallback_text}, ensure_ascii=False)
+                fallback_response = self._send_message_sync(
+                    receive_id_type=receive_id_type,
+                    receive_id=chat_id,
+                    msg_type="text",
+                    content=fallback_content,
+                )
+                if not fallback_response.success():
+                    fallback_log_id = self._response_log_id(fallback_response)
+                    logger.error(
+                        "Failed to send Feishu fallback text message: "
+                        f"code={fallback_response.code}, msg={fallback_response.msg}, log_id={fallback_log_id}"
+                    )
             else:
-                logger.debug(f"Feishu message sent to {msg.chat_id}")
+                logger.debug(f"Feishu {send_msg_type} message sent to {msg.chat_id}")
                 
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
+            try:
+                if send_msg_type == "text":
+                    return
+                fallback_text = self._build_text_fallback_message(msg.content, str(e))
+                fallback_content = json.dumps({"text": fallback_text}, ensure_ascii=False)
+                fallback_response = self._send_message_sync(
+                    receive_id_type=receive_id_type,
+                    receive_id=chat_id,
+                    msg_type="text",
+                    content=fallback_content,
+                )
+                if not fallback_response.success():
+                    fallback_log_id = self._response_log_id(fallback_response)
+                    logger.error(
+                        "Failed to send Feishu fallback text message after exception: "
+                        f"code={fallback_response.code}, msg={fallback_response.msg}, log_id={fallback_log_id}"
+                    )
+            except Exception as fallback_error:
+                logger.error(f"Error sending Feishu fallback text message: {fallback_error}")
     
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """

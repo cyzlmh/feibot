@@ -24,14 +24,6 @@ from feibot.agent.subagent import SubagentManager
 from feibot.agent.tools.cron import CronTool
 from feibot.agent.tools.feishu import (
     FeishuAppScopesTool,
-    FeishuBitableCreateAppTool,
-    FeishuBitableCreateFieldTool,
-    FeishuBitableCreateRecordTool,
-    FeishuBitableGetMetaTool,
-    FeishuBitableGetRecordTool,
-    FeishuBitableListFieldsTool,
-    FeishuBitableListRecordsTool,
-    FeishuBitableUpdateRecordTool,
     FeishuDocTool,
     FeishuDriveTool,
     FeishuPermTool,
@@ -153,6 +145,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         debug: bool = False,
         agent_name: str = "feibot",
+        disabled_tools: list[str] | None = None,
     ):
         from feibot.config.schema import ExecToolConfig
 
@@ -343,54 +336,6 @@ class AgentLoop:
         )
         self.tools.register(
             FeishuPermTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableGetMetaTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableListFieldsTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableListRecordsTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableGetRecordTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableCreateRecordTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableUpdateRecordTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableCreateAppTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuBitableCreateFieldTool(
                 app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
                 app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
             )
@@ -1040,14 +985,6 @@ class AgentLoop:
             "feishu_drive": ["action", "folder_token", "file_token", "name", "type"],
             "feishu_app_scopes": [],
             "feishu_perm": ["action", "type", "token", "member_type", "member_id"],
-            "feishu_bitable_get_meta": ["url"],
-            "feishu_bitable_list_fields": ["app_token", "table_id"],
-            "feishu_bitable_list_records": ["app_token", "table_id"],
-            "feishu_bitable_get_record": ["record_id", "app_token", "table_id"],
-            "feishu_bitable_create_record": ["app_token", "table_id"],
-            "feishu_bitable_update_record": ["record_id", "app_token", "table_id"],
-            "feishu_bitable_create_app": ["name", "folder_token"],
-            "feishu_bitable_create_field": ["field_name", "field_type", "app_token", "table_id"],
         }
         default_preferred_keys = [
             "path",

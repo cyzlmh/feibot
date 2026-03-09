@@ -491,157 +491,86 @@ class FeishuDocTool(_FeishuSdkToolBase):
 
     @property
     def parameters(self) -> dict[str, Any]:
+        # Note: Using a unified schema instead of oneOf for Codex model compatibility
+        # oneOf/anyOf at the top level is not supported by some LLM models
         return {
             "type": "object",
-            "oneOf": [
-                self._doc_action_schema("read", require_doc_ref=True),
-                self._doc_action_schema(
-                    "list_blocks",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "page_size": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 500,
-                            "description": "Page size for list_blocks (default 200).",
-                        },
-                        "page_token": {
-                            "type": "string",
-                            "description": "Pagination token for list_blocks.",
-                        },
-                    },
-                ),
-                self._doc_action_schema(
-                    "get_block",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "block_id": {
-                            "type": "string",
-                            "description": "DocX block_id for action=get_block.",
-                        },
-                    },
-                    required=["block_id"],
-                ),
-                self._doc_action_schema(
-                    "update_block",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "block_id": {
-                            "type": "string",
-                            "description": "DocX block_id for action=update_block.",
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Plain text content for action=update_block.",
-                        },
-                    },
-                    required=["block_id", "content"],
-                ),
-                self._doc_action_schema(
-                    "delete_block",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "block_id": {
-                            "type": "string",
-                            "description": "DocX block_id for action=delete_block (not the document token).",
-                        },
-                    },
-                    required=["block_id"],
-                ),
-                self._doc_action_schema(
-                    "create",
-                    extra_properties={
-                        "title": {
-                            "type": "string",
-                            "description": "Title for action=create.",
-                        },
-                        "folder_token": {
-                            "type": "string",
-                            "description": "Optional folder token for action=create (do not use wiki node token here).",
-                        },
-                        "wiki_space_id": {
-                            "type": "string",
-                            "description": "Optional wiki knowledge space ID for action=create (overrides configured default).",
-                        },
-                        "wiki_parent_node_token": {
-                            "type": "string",
-                            "description": "Optional wiki parent node token for action=create (overrides configured default).",
-                        },
-                    },
-                    required=["title"],
-                ),
-                self._doc_action_schema(
-                    "append",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "content": {
-                            "type": "string",
-                            "description": "Markdown content for action=append.",
-                        },
-                    },
-                    required=["content"],
-                ),
-                self._doc_action_schema(
-                    "write",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "content": {
-                            "type": "string",
-                            "description": "Markdown content for action=write (replaces document content).",
-                        },
-                    },
-                    required=["content"],
-                ),
-                self._doc_action_schema(
-                    "write_safe",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "content": {
-                            "type": "string",
-                            "description": (
-                                "Markdown content for action=write_safe (replaces document content). "
-                                "The tool writes in internal chunks with retry to reduce large-write failures."
-                            ),
-                        },
-                        "chunk_chars": {
-                            "type": "integer",
-                            "minimum": _DOCX_WRITE_CHUNK_CHARS_MIN,
-                            "maximum": _DOCX_WRITE_CHUNK_CHARS_MAX,
-                            "description": (
-                                "Approximate chunk size for action=write_safe (default 3500). "
-                                "Lower values are safer; higher values are faster."
-                            ),
-                        },
-                    },
-                    required=["content"],
-                ),
-                self._doc_action_schema(
-                    "insert_image",
-                    require_doc_ref=True,
-                    extra_properties={
-                        "image_path": {
-                            "type": "string",
-                            "description": "Local image file path for action=insert_image.",
-                        },
-                        "image_width": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Optional image width for action=insert_image.",
-                        },
-                        "image_height": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Optional image height for action=insert_image.",
-                        },
-                        "image_scale": {
-                            "type": "number",
-                            "exclusiveMinimum": 0,
-                            "description": "Optional image scale for action=insert_image (e.g. 0.5, 1.0).",
-                        },
-                    },
-                    required=["image_path"],
-                ),
-            ],
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["read", "list_blocks", "get_block", "update_block", "delete_block", "create", "append", "write", "write_safe", "insert_image"],
+                    "description": "DocX operation. One of: read, list_blocks, get_block, update_block, delete_block, create, append, write, write_safe, insert_image.",
+                },
+                "doc_token": {
+                    "type": "string",
+                    "description": "Doc token (document_id) from a /docx/<token> URL. Required for read, list_blocks, get_block, update_block, delete_block, append, write, write_safe, insert_image.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Optional DocX URL. If provided, doc_token can be omitted (for read, list_blocks, get_block, update_block, delete_block, append, write, write_safe, insert_image).",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title for action=create.",
+                },
+                "folder_token": {
+                    "type": "string",
+                    "description": "Optional folder token for action=create (do not use wiki node token here).",
+                },
+                "wiki_space_id": {
+                    "type": "string",
+                    "description": "Optional wiki knowledge space ID for action=create (overrides configured default).",
+                },
+                "wiki_parent_node_token": {
+                    "type": "string",
+                    "description": "Optional wiki parent node token for action=create (overrides configured default).",
+                },
+                "block_id": {
+                    "type": "string",
+                    "description": "DocX block_id for action=get_block, update_block, delete_block.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content for action=update_block (plain text), append/write/write_safe (markdown).",
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Page size for list_blocks (default 200).",
+                },
+                "page_token": {
+                    "type": "string",
+                    "description": "Pagination token for list_blocks.",
+                },
+                "chunk_chars": {
+                    "type": "integer",
+                    "minimum": _DOCX_WRITE_CHUNK_CHARS_MIN,
+                    "maximum": _DOCX_WRITE_CHUNK_CHARS_MAX,
+                    "description": "Approximate chunk size for action=write_safe (default 3500). Lower values are safer; higher values are faster.",
+                },
+                "image_path": {
+                    "type": "string",
+                    "description": "Local image file path for action=insert_image.",
+                },
+                "image_width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional image width for action=insert_image.",
+                },
+                "image_height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional image height for action=insert_image.",
+                },
+                "image_scale": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Optional image scale for action=insert_image (e.g. 0.5, 1.0).",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
         }
 
     def _doc_action_schema(
@@ -681,8 +610,8 @@ class FeishuDocTool(_FeishuSdkToolBase):
             "required": ["action", *(required or [])],
             "additionalProperties": False,
         }
-        if require_doc_ref:
-            schema["anyOf"] = [{"required": ["doc_token"]}, {"required": ["url"]}]
+        # Note: anyOf is not supported by some LLM models (e.g., Codex)
+        # Validation that at least one of doc_token/url is provided is done in execute()
         return schema
 
     async def execute(
@@ -1766,108 +1695,66 @@ class FeishuWikiTool(_FeishuSdkToolBase):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        page_size_schema = {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": self._WIKI_PAGE_SIZE_MAX,
-            "description": "Page size (optional).",
-        }
-        space_id_schema = {
-            "description": "Wiki space_id.",
-            "anyOf": [{"type": "string"}, {"type": "integer"}],
-        }
-        page_token_schema = {"type": "string", "description": "Pagination token (optional)."}
+        # Note: Using a unified schema instead of oneOf for Codex model compatibility
+        # oneOf/anyOf at the top level is not supported by some LLM models
         return {
             "type": "object",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["spaces"]},
-                        "page_size": page_size_schema,
-                        "page_token": page_token_schema,
-                    },
-                    "required": ["action"],
-                    "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["spaces", "nodes", "get", "create", "move", "rename"],
+                    "description": "Wiki operation. One of: spaces, nodes, get, create, move, rename.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["nodes"]},
-                        "space_id": space_id_schema,
-                        "parent_node_token": {
-                            "type": "string",
-                            "description": "Optional parent wiki node token. Omit for root.",
-                        },
-                        "page_size": page_size_schema,
-                        "page_token": page_token_schema,
-                    },
-                    "required": ["action", "space_id"],
-                    "additionalProperties": False,
+                "space_id": {
+                    "type": "string",
+                    "description": "Wiki space_id (string). Required for nodes, create, move, rename.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["get"]},
-                        "token": {"type": "string", "description": "Wiki node token (from /wiki/<token>)."},
-                        "url": {"type": "string", "description": "Optional Wiki URL (extracts /wiki/<token>)."},
-                    },
-                    "required": ["action"],
-                    "anyOf": [{"required": ["token"]}, {"required": ["url"]}],
-                    "additionalProperties": False,
+                "parent_node_token": {
+                    "type": "string",
+                    "description": "Optional parent wiki node token. Used for nodes (omit for root), create, move.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["create"]},
-                        "space_id": space_id_schema,
-                        "title": {"type": "string", "description": "Node title."},
-                        "obj_type": {
-                            "type": "string",
-                            "enum": ["docx", "sheet", "bitable"],
-                            "description": "Object type (default docx).",
-                        },
-                        "parent_node_token": {
-                            "type": "string",
-                            "description": "Optional parent wiki node token.",
-                        },
-                    },
-                    "required": ["action", "space_id", "title"],
-                    "additionalProperties": False,
+                "token": {
+                    "type": "string",
+                    "description": "Wiki node token (from /wiki/<token>). Required for get if url not provided.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["move"]},
-                        "space_id": {
-                            "description": "Source Wiki space_id.",
-                            "anyOf": [{"type": "string"}, {"type": "integer"}],
-                        },
-                        "node_token": {"type": "string", "description": "Wiki node token to move."},
-                        "target_space_id": {
-                            "description": "Target space_id (optional; same space if omitted).",
-                            "anyOf": [{"type": "string"}, {"type": "integer"}],
-                        },
-                        "target_parent_token": {
-                            "type": "string",
-                            "description": "Target parent node token (optional; root if omitted).",
-                        },
-                    },
-                    "required": ["action", "space_id", "node_token"],
-                    "additionalProperties": False,
+                "url": {
+                    "type": "string",
+                    "description": "Optional Wiki URL (extracts /wiki/<token>). Alternative to token for get.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["rename"]},
-                        "space_id": space_id_schema,
-                        "node_token": {"type": "string", "description": "Wiki node token."},
-                        "title": {"type": "string", "description": "New title."},
-                    },
-                    "required": ["action", "space_id", "node_token", "title"],
-                    "additionalProperties": False,
+                "title": {
+                    "type": "string",
+                    "description": "Node title. Required for create and rename.",
                 },
-            ],
+                "obj_type": {
+                    "type": "string",
+                    "enum": ["docx", "sheet", "bitable"],
+                    "description": "Object type for create (default docx).",
+                },
+                "node_token": {
+                    "type": "string",
+                    "description": "Wiki node token. Required for move and rename.",
+                },
+                "target_space_id": {
+                    "type": "string",
+                    "description": "Target space_id for move (optional; same space if omitted).",
+                },
+                "target_parent_token": {
+                    "type": "string",
+                    "description": "Target parent node token for move (optional; root if omitted).",
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": self._WIKI_PAGE_SIZE_MAX,
+                    "description": "Page size for spaces and nodes (optional).",
+                },
+                "page_token": {
+                    "type": "string",
+                    "description": "Pagination token for spaces and nodes (optional).",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
         }
 
     async def execute(
@@ -2174,76 +2061,46 @@ class FeishuDriveTool(_FeishuSdkToolBase):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        file_type_schema = {
-            "type": "string",
-            "enum": list(_FEISHU_DRIVE_FILE_TYPES),
-            "description": "Feishu Drive file type (docx, sheet, folder, file, etc.).",
-        }
+        # Note: Using a unified schema instead of oneOf for Codex model compatibility
+        # oneOf/anyOf at the top level is not supported by some LLM models
         return {
             "type": "object",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["list"]},
-                        "folder_token": {
-                            "type": "string",
-                            "description": "Optional folder token. Omit to list root.",
-                        },
-                        "page_size": {"type": "integer", "minimum": 1, "maximum": 200},
-                        "page_token": {"type": "string"},
-                    },
-                    "required": ["action"],
-                    "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "info", "create_folder", "move", "delete"],
+                    "description": "Drive operation. One of: list, info, create_folder, move, delete.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["info"]},
-                        "file_token": {"type": "string", "description": "File token to find."},
-                        "folder_token": {
-                            "type": "string",
-                            "description": "Optional folder token to search in (default root).",
-                        },
-                    },
-                    "required": ["action", "file_token"],
-                    "additionalProperties": False,
+                "folder_token": {
+                    "type": "string",
+                    "description": "Optional folder token. Used for list (omit for root), info (search folder), create_folder (parent), move (target).",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["create_folder"]},
-                        "name": {"type": "string", "description": "Folder name to create."},
-                        "folder_token": {
-                            "type": "string",
-                            "description": "Optional parent folder token. Omit for root.",
-                        },
-                    },
-                    "required": ["action", "name"],
-                    "additionalProperties": False,
+                "file_token": {
+                    "type": "string",
+                    "description": "File token. Required for info, move, delete.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["move"]},
-                        "file_token": {"type": "string", "description": "File token to move."},
-                        "type": file_type_schema,
-                        "folder_token": {"type": "string", "description": "Target folder token."},
-                    },
-                    "required": ["action", "file_token", "type", "folder_token"],
-                    "additionalProperties": False,
+                "type": {
+                    "type": "string",
+                    "enum": list(_FEISHU_DRIVE_FILE_TYPES),
+                    "description": "Feishu Drive file type (docx, sheet, folder, file, etc.). Required for move and delete.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["delete"]},
-                        "file_token": {"type": "string", "description": "File token to delete."},
-                        "type": file_type_schema,
-                    },
-                    "required": ["action", "file_token", "type"],
-                    "additionalProperties": False,
+                "name": {
+                    "type": "string",
+                    "description": "Folder name to create. Required for create_folder.",
                 },
-            ],
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Page size for list (optional).",
+                },
+                "page_token": {
+                    "type": "string",
+                    "description": "Pagination token for list (optional).",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
         }
 
     async def execute(
@@ -2522,59 +2379,42 @@ class FeishuPermTool(_FeishuSdkToolBase):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        token_type_schema = {
-            "type": "string",
-            "enum": list(_FEISHU_PERM_TOKEN_TYPES),
-            "description": "Token type (e.g. docx, wiki, folder).",
-        }
-        member_type_schema = {
-            "type": "string",
-            "enum": list(_FEISHU_PERM_MEMBER_TYPES),
-            "description": "Member type (openid, groupid, etc.).",
-        }
+        # Note: Using a unified schema instead of oneOf for Codex model compatibility
+        # oneOf/anyOf at the top level is not supported by some LLM models
         return {
             "type": "object",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["list"]},
-                        "token": {"type": "string", "description": "Target token."},
-                        "type": token_type_schema,
-                    },
-                    "required": ["action", "token", "type"],
-                    "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "add", "remove"],
+                    "description": "Permission operation. One of: list, add, remove.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["add"]},
-                        "token": {"type": "string", "description": "Target token."},
-                        "type": token_type_schema,
-                        "member_type": member_type_schema,
-                        "member_id": {"type": "string", "description": "Member ID."},
-                        "perm": {
-                            "type": "string",
-                            "enum": list(_FEISHU_PERM_VALUES),
-                            "description": "Permission level.",
-                        },
-                    },
-                    "required": ["action", "token", "type", "member_type", "member_id", "perm"],
-                    "additionalProperties": False,
+                "token": {
+                    "type": "string",
+                    "description": "Target token (docx/wiki/folder/file). Required for list, add, remove.",
                 },
-                {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["remove"]},
-                        "token": {"type": "string", "description": "Target token."},
-                        "type": token_type_schema,
-                        "member_type": member_type_schema,
-                        "member_id": {"type": "string", "description": "Member ID to remove."},
-                    },
-                    "required": ["action", "token", "type", "member_type", "member_id"],
-                    "additionalProperties": False,
+                "type": {
+                    "type": "string",
+                    "enum": list(_FEISHU_PERM_TOKEN_TYPES),
+                    "description": "Token type (e.g. docx, wiki, folder). Required for list, add, remove.",
                 },
-            ],
+                "member_type": {
+                    "type": "string",
+                    "enum": list(_FEISHU_PERM_MEMBER_TYPES),
+                    "description": "Member type (openid, groupid, etc.). Required for add and remove.",
+                },
+                "member_id": {
+                    "type": "string",
+                    "description": "Member ID. Required for add and remove.",
+                },
+                "perm": {
+                    "type": "string",
+                    "enum": list(_FEISHU_PERM_VALUES),
+                    "description": "Permission level. Required for add.",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
         }
 
     async def execute(
