@@ -13,6 +13,7 @@ class MemoryStore:
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
+        self.review_file = self.memory_dir / "REVIEW.md"
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -25,6 +26,22 @@ class MemoryStore:
     def append_history(self, entry: str) -> None:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
+
+    def read_history(self) -> str:
+        if self.history_file.exists():
+            return self.history_file.read_text(encoding="utf-8")
+        return ""
+
+    def write_history(self, content: str) -> None:
+        self.history_file.write_text(content, encoding="utf-8")
+
+    def read_review(self) -> str:
+        if self.review_file.exists():
+            return self.review_file.read_text(encoding="utf-8")
+        return ""
+
+    def write_review(self, content: str) -> None:
+        self.review_file.write_text(content, encoding="utf-8")
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:

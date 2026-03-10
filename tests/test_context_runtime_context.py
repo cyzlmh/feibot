@@ -51,10 +51,10 @@ def test_system_prompt_contains_only_group_chat_spawn_policy_for_oc_chat(tmp_pat
     assert "call `spawn` early" not in prompt
 
 
-def test_system_prompt_does_not_preload_long_term_memory(tmp_path: Path) -> None:
+def test_system_prompt_preloads_long_term_memory(tmp_path: Path) -> None:
     ctx = ContextBuilder(tmp_path)
     memory_dir = tmp_path / "memory"
-    memory_dir.mkdir()
+    memory_dir.mkdir(exist_ok=True)
     (memory_dir / "MEMORY.md").write_text(
         "## Technical Notes\n- SwanLab logging issue exists in nanochat.\n",
         encoding="utf-8",
@@ -66,5 +66,6 @@ def test_system_prompt_does_not_preload_long_term_memory(tmp_path: Path) -> None
         chat_id="oc_group_1",
     )
 
-    assert "SwanLab logging issue exists in nanochat." not in prompt
-    assert "Long-term memory is not preloaded into the prompt." in prompt
+    assert "SwanLab logging issue exists in nanochat." in prompt
+    assert "`memory/MEMORY.md` is preloaded into every prompt." in prompt
+    assert "Do not add anything to `memory/MEMORY.md` unless the user explicitly approves it." in prompt

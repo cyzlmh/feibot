@@ -1,15 +1,28 @@
 # Long-term Memory
 
-This file stores important information that should persist across sessions.
+Only keep durable, approved facts here. This file is loaded into every prompt.
 
-## User Information
+## User Preferences
 
-(Important facts about the user)
+- Add only explicit, stable user preferences after approval.
 
-## Preferences
+## Stable Tooling Preferences
 
-(User preferences learned over time)
+- Add durable workflow rules like preferred commands or runtimes after approval.
 
-## Important Notes
+## Stable Paths
 
-(Things to remember)
+- Keep canonical project/workspace paths that are useful across sessions.
+
+## Project Policies
+
+- Keep durable repo, branch, deployment, or operating policies that should always be remembered.
+
+## Important Relationships
+
+- Keep stable people/project relationships that matter across sessions.
+
+## Notes
+
+- Do not add transient bugs, one-off tasks, or session-local details.
+- Do not update this file without explicit user approval.

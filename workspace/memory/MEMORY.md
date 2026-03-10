@@ -1,23 +1,28 @@
 # Long-term Memory
 
-This file stores important information that should persist across sessions.
+Only keep durable, approved facts here. This file is loaded into every prompt.
 
-## User Information
+## User Preferences
 
-(Important facts about the user)
+- Add only explicit, stable user preferences after approval.
 
-## Preferences
+## Stable Tooling Preferences
 
-(User preferences learned over time)
+- Add durable workflow rules like preferred commands or runtimes after approval.
 
-## Project Context
+## Stable Paths
 
-(Information about ongoing projects)
+- Keep canonical project/workspace paths that are useful across sessions.
 
-## Important Notes
+## Project Policies
 
-(Things to remember)
+- Keep durable repo, branch, deployment, or operating policies that should always be remembered.
 
----
+## Important Relationships
 
-*This file is automatically updated by feibot when important information should be remembered.*
+- Keep stable people/project relationships that matter across sessions.
+
+## Notes
+
+- Do not add transient bugs, one-off tasks, or session-local details.
+- Do not update this file without explicit user approval.

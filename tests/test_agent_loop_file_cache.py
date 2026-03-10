@@ -83,7 +83,7 @@ async def test_file_message_is_cached_until_followup_text(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_new_clears_pending_files_from_session_metadata(monkeypatch, tmp_path):
+async def test_new_clears_pending_files_from_session_metadata(tmp_path):
     loop = _make_loop(tmp_path)
 
     file_msg = InboundMessage(
@@ -96,11 +96,7 @@ async def test_new_clears_pending_files_from_session_metadata(monkeypatch, tmp_p
     )
     ack = await loop._process_message(file_msg)
     assert ack is not None
-
-    async def _fake_consolidate_memory(session, archive_all=False):
-        return True
-
-    monkeypatch.setattr(loop, "_consolidate_memory", _fake_consolidate_memory)
+    old_session_id = loop.sessions.get_or_create("feishu:ou_test").session_id
 
     new_msg = InboundMessage(
         channel="feishu",
@@ -114,20 +110,17 @@ async def test_new_clears_pending_files_from_session_metadata(monkeypatch, tmp_p
     assert resp is not None
     assert resp.content == "New session started."
     session = loop.sessions.get_or_create("feishu:ou_test")
+    assert session.session_id != old_session_id
     assert "pending_files" not in session.metadata
 
 
 @pytest.mark.asyncio
-async def test_new_command_with_mention_prefix_resets_session(monkeypatch, tmp_path):
+async def test_new_command_with_mention_prefix_resets_session(tmp_path):
     loop = _make_loop(tmp_path)
     session = loop.sessions.get_or_create("feishu:oc_group_1")
     session.add_message("user", "old context")
     loop.sessions.save(session)
-
-    async def _fake_consolidate_memory(session, archive_all=False):
-        return True
-
-    monkeypatch.setattr(loop, "_consolidate_memory", _fake_consolidate_memory)
+    old_session_id = session.session_id
 
     resp = await loop._process_message(
         InboundMessage(
@@ -142,6 +135,7 @@ async def test_new_command_with_mention_prefix_resets_session(monkeypatch, tmp_p
     assert resp is not None
     assert resp.content == "New session started."
     session = loop.sessions.get_or_create("feishu:oc_group_1")
+    assert session.session_id != old_session_id
     assert session.messages == []
 
 

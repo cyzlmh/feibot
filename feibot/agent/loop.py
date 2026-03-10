@@ -731,7 +731,7 @@ class AgentLoop:
 
                 session.add_message("assistant", denial_content, tools_used=["exec"])
                 self.channel_logs.append(
-                    session_key,
+                    session,
                     LogEntry(
                         role="assistant",
                         content=denial_content,
@@ -949,7 +949,7 @@ class AgentLoop:
                         tools_used=tools_used if tools_used else None,
                     )
                 self.channel_logs.append(
-                    continuation.session_key,
+                    session,
                     LogEntry(
                         role="assistant",
                         content=final_content,
@@ -1619,7 +1619,7 @@ class AgentLoop:
                     denial_content = f"⏱ Exec approval expired (ID: {request.id})."
                     session.add_message("assistant", denial_content, tools_used=["exec"])
                     self.channel_logs.append(
-                        continuation.session_key,
+                        session,
                         LogEntry(
                             role="assistant",
                             content=denial_content,
@@ -1917,15 +1917,7 @@ class AgentLoop:
                 ),
             )
         if cmd == "/new":
-            snapshot = list(session.messages[session.last_consolidated:])
-
-            # Prevent raw channel-log backfill from resurrecting pre-/new messages.
-            session.metadata["raw_log_sync_after_ts"] = msg.timestamp.isoformat()
-            session.clear()
-            session.metadata.pop(self.PENDING_FILES_METADATA_KEY, None)
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
-            self._schedule_archive_all_consolidation(session.key, snapshot)
+            self.sessions.rotate(session.key)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -1966,28 +1958,9 @@ class AgentLoop:
             else:
                 effective_content = "Continue the previous unfinished task with current context."
 
-        unconsolidated = len(session.messages) - session.last_consolidated
-        if unconsolidated >= self.memory_window and session.key not in self._consolidating:
-            self._consolidating.add(session.key)
-            lock = self._get_consolidation_lock(session.key)
-
-            async def _consolidate_and_unlock() -> None:
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session)
-                finally:
-                    self._consolidating.discard(session.key)
-                    self._prune_consolidation_lock(session.key, lock)
-                    task = asyncio.current_task()
-                    if task is not None:
-                        self._consolidation_tasks.discard(task)
-
-            task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(task)
-
         # Record raw inbound message for audit/replay and backfill older unsynced messages.
         self.channel_logs.append(
-            key,
+            session,
             LogEntry(
                 role="user",
                 content=msg.content,
@@ -2003,11 +1976,6 @@ class AgentLoop:
             key,
             session,
             exclude_message_id=message_id,
-            after_timestamp=(
-                str(session.metadata.get("raw_log_sync_after_ts"))
-                if session.metadata.get("raw_log_sync_after_ts")
-                else None
-            ),
         )
         if synced_count > 0:
             logger.info(f"Backfilled {synced_count} user messages from raw log for session {key}")
@@ -2034,7 +2002,7 @@ class AgentLoop:
             )
             session.add_message("assistant", final_content)
             self.channel_logs.append(
-                key,
+                session,
                 LogEntry(
                     role="assistant",
                     content=final_content,
@@ -2144,7 +2112,7 @@ class AgentLoop:
                     tools_used=tools_used if tools_used else None,
                 )
             self.channel_logs.append(
-                key,
+                session,
                 LogEntry(
                     role="assistant",
                     content=final_content,

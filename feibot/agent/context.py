@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from feibot.agent.memory import MemoryStore
 from feibot.agent.skills import SkillsLoader
 
 
@@ -26,6 +27,7 @@ class ContextBuilder:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.skills = SkillsLoader(workspace)
+        self.memory = MemoryStore(workspace)
     
     def build_system_prompt(
         self,
@@ -54,6 +56,10 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
+
+        long_term_memory = self.memory.read_long_term().strip()
+        if long_term_memory:
+            parts.append(f"# Long-term Memory\n\n{long_term_memory}")
 
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
@@ -127,9 +133,10 @@ For code explanation/debugging tasks, prefer find_file + grep_text + read_file b
 Use exec mainly for commands that cannot be done with dedicated tools.
 {spawn_policy_text}
 Use the current session history as your primary context.
-Long-term memory is not preloaded into the prompt. If the user asks about prior preferences, earlier decisions, or what you remember, inspect {workspace_path}/memory/MEMORY.md or grep {workspace_path}/memory/HISTORY.md explicitly.
-When remembering something important, write to {workspace_path}/memory/MEMORY.md
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+`memory/MEMORY.md` is preloaded into every prompt. Treat it as approved global memory only.
+Do not add anything to `memory/MEMORY.md` unless the user explicitly approves it.
+Do not inspect or grep `memory/HISTORY.md` unless the user asks about prior sessions, past events, or what happened before.
+Use the current session history for the active conversation. Older sessions live in dated session logs and the history index for explicit recall only."""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:

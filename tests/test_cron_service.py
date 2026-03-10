@@ -119,6 +119,28 @@ def test_upsert_job_updates_schedule_for_same_identity(tmp_path) -> None:
     assert second.schedule.tz == "Asia/Shanghai"
 
 
+def test_upsert_job_keeps_system_events_distinct_from_agent_turns(tmp_path) -> None:
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    first, first_status = service.upsert_job(
+        name="nightly-history-sync",
+        schedule=CronSchedule(kind="cron", expr="0 4 * * *"),
+        message="history_sync",
+        payload_kind="system_event",
+    )
+    second, second_status = service.upsert_job(
+        name="history-sync-chat",
+        schedule=CronSchedule(kind="cron", expr="0 4 * * *"),
+        message="history_sync",
+    )
+
+    jobs = service.list_jobs(include_disabled=True)
+    assert first_status == "created"
+    assert second_status == "created"
+    assert len(jobs) == 2
+    assert first.id != second.id
+
+
 @pytest.mark.asyncio
 async def test_running_service_honors_external_disable(tmp_path) -> None:
     store_path = tmp_path / "cron" / "jobs.json"

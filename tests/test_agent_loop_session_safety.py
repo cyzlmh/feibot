@@ -107,7 +107,7 @@ async def test_llm_error_response_not_persisted_to_session(monkeypatch, tmp_path
     assert resp.content == "provider error"
     session = loop.sessions.get_or_create("feishu:ou_test")
     assert [m["role"] for m in session.messages] == ["user"]
-    raw_log_path = loop.channel_logs._get_log_path("feishu:ou_test")
+    raw_log_path = loop.channel_logs._get_log_path("feishu:ou_test", session=session)
     entries = [json.loads(line) for line in raw_log_path.read_text(encoding="utf-8").splitlines()]
     assert entries[-1]["role"] == "assistant"
     assert entries[-1]["metadata"]["model"] == "openai/gpt-5.3-codex"

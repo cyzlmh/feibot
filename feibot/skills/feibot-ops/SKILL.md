@@ -83,7 +83,7 @@ When creating a new instance:
    - Always explain what you're doing before taking actions
    - Ask for clarification when the request is ambiguous
    - Use tools to help accomplish tasks
-   - Remember important information in memory/MEMORY.md; past events are logged in memory/HISTORY.md
+   - `memory/MEMORY.md` is approved global context; `memory/HISTORY.md` is the searchable session index
    ```
 
 4. **Install and start**:

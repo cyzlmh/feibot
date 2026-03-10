@@ -252,8 +252,9 @@ def gateway(
     from feibot.bus.queue import MessageBus
     from feibot.channels.manager import ChannelManager
     from feibot.cron.service import CronService
-    from feibot.cron.types import CronJob
+    from feibot.cron.types import CronJob, CronSchedule
     from feibot.heartbeat.service import HeartbeatService
+    from feibot.history.service import HistorySyncService
     from feibot.session.manager import SessionManager
 
     if verbose:
@@ -266,6 +267,12 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config, config_path)
     session_manager = SessionManager(sessions)
+    history_sync = HistorySyncService(
+        workspace=workspace,
+        session_manager=session_manager,
+        provider=provider,
+        model=config.agents.defaults.model,
+    )
     cron_store_path = workspace / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
@@ -291,13 +298,19 @@ def gateway(
 
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-            metadata={"_suppress_progress": True},
-        )
+        if job.payload.kind == "system_event":
+            if job.payload.message == "history_sync":
+                response = await history_sync.run()
+            else:
+                response = f"Unknown system event: {job.payload.message}"
+        else:
+            response = await agent.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+                metadata={"_suppress_progress": True},
+            )
         if job.payload.deliver and job.payload.to and response and response.strip():
             from feibot.bus.events import OutboundMessage
 
@@ -328,7 +341,7 @@ def gateway(
 
         latest_ts = ""
         latest_chat_id: str | None = None
-        for path in logs_dir.glob("feishu_oc_*.jsonl"):
+        for path in logs_dir.rglob("*.jsonl"):
             try:
                 with open(path, encoding="utf-8") as f:
                     for line in f:
@@ -427,6 +440,17 @@ def gateway(
         enabled=True,
     )
 
+    heartbeat_channel, heartbeat_chat_id = _pick_heartbeat_target()
+    cron.upsert_job(
+        name="nightly-history-sync",
+        schedule=CronSchedule(kind="cron", expr="0 4 * * *"),
+        message="history_sync",
+        payload_kind="system_event",
+        deliver=heartbeat_channel != "cli",
+        channel=heartbeat_channel if heartbeat_channel != "cli" else None,
+        to=heartbeat_chat_id if heartbeat_channel != "cli" else None,
+    )
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -437,7 +461,6 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
     console.print("[green]✓[/green] Heartbeat: every 30m")
-    heartbeat_channel, heartbeat_chat_id = _pick_heartbeat_target()
     console.print(
         f"[green]✓[/green] Heartbeat target: {heartbeat_channel}:{heartbeat_chat_id}"
     )
@@ -760,6 +783,7 @@ def cron_run(
     from feibot.bus.queue import MessageBus
     from feibot.cron.service import CronService
     from feibot.cron.types import CronJob
+    from feibot.history.service import HistorySyncService
     from feibot.session.manager import SessionManager
 
     logger.disable("feibot")
@@ -789,17 +813,29 @@ def cron_run(
         session_manager=SessionManager(sessions),
         agent_name=config.name,
     )
+    history_sync = HistorySyncService(
+        workspace=workspace,
+        session_manager=agent_loop.sessions,
+        provider=provider,
+        model=config.agents.defaults.model,
+    )
 
     result_holder: list[str | None] = []
 
     async def on_job(job: CronJob) -> str | None:
-        response = await agent_loop.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-            metadata={"_suppress_progress": True},
-        )
+        if job.payload.kind == "system_event":
+            if job.payload.message == "history_sync":
+                response = await history_sync.run()
+            else:
+                response = f"Unknown system event: {job.payload.message}"
+        else:
+            response = await agent_loop.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+                metadata={"_suppress_progress": True},
+            )
         result_holder.append(response)
         return response
 

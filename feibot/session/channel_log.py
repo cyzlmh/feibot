@@ -30,24 +30,28 @@ class ChannelLogStore:
     """
     Persistent raw message log.
 
-    - Stores channel records in `workspace/logs/<session>.jsonl`.
-    - Can sync user records back into Session when context store misses messages.
+    New logs are stored per session in ``workspace/logs/YYYY/MM/DD/<session_id>.jsonl``.
+    Legacy flat ``workspace/logs/<session>.jsonl`` files are still readable.
     """
 
     def __init__(self, logs_dir: Path):
         self.logs_dir = ensure_dir(logs_dir)
         self._seen_user_ids: dict[str, set[str]] = {}
 
-    def _get_log_path(self, session_key: str) -> Path:
+    def _legacy_log_path(self, session_key: str) -> Path:
         safe_key = safe_filename(session_key.replace(":", "_"))
         return self.logs_dir / f"{safe_key}.jsonl"
 
-    def _load_seen_user_ids(self, session_key: str) -> set[str]:
-        if session_key in self._seen_user_ids:
-            return self._seen_user_ids[session_key]
+    def _get_log_path(self, session_key: str, session: Session | None = None) -> Path:
+        if session is not None and session.session_id:
+            return self.logs_dir / f"{session.created_at:%Y/%m/%d}" / f"{session.session_id}.jsonl"
+        return self._legacy_log_path(session_key)
+
+    def _load_seen_user_ids(self, cache_key: str, path: Path) -> set[str]:
+        if cache_key in self._seen_user_ids:
+            return self._seen_user_ids[cache_key]
 
         seen: set[str] = set()
-        path = self._get_log_path(session_key)
         if path.exists():
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -61,17 +65,24 @@ class ChannelLogStore:
                     if data.get("role") == "user" and data.get("message_id"):
                         seen.add(str(data["message_id"]))
 
-        self._seen_user_ids[session_key] = seen
+        self._seen_user_ids[cache_key] = seen
         return seen
 
-    def append(self, session_key: str, entry: LogEntry) -> None:
+    def append(self, session_or_key: Session | str, entry: LogEntry) -> None:
         """Append a raw log entry. User entries are deduped by message_id."""
-        path = self._get_log_path(session_key)
+        session = session_or_key if isinstance(session_or_key, Session) else None
+        session_key = session.key if session is not None else str(session_or_key)
+        path = self._get_log_path(session_key, session=session)
+        ensure_dir(path.parent)
+        cache_key = str(path)
+
         payload: dict[str, Any] = {
             "role": entry.role,
             "content": entry.content,
             "timestamp": entry.timestamp,
         }
+        if session is not None and session.session_id:
+            payload["session_id"] = session.session_id
         if entry.message_id:
             payload["message_id"] = entry.message_id
         if entry.sender_id:
@@ -84,7 +95,7 @@ class ChannelLogStore:
             payload["metadata"] = entry.metadata
 
         if entry.role == "user" and entry.message_id:
-            seen_ids = self._load_seen_user_ids(session_key)
+            seen_ids = self._load_seen_user_ids(cache_key, path)
             if entry.message_id in seen_ids:
                 return
             seen_ids.add(entry.message_id)
@@ -105,16 +116,19 @@ class ChannelLogStore:
 
         Returns the number of user records added to the session.
         """
-        path = self._get_log_path(session_key)
+        path = self._get_log_path(session_key, session=session)
         if not path.exists():
-            return 0
+            legacy = self._legacy_log_path(session_key)
+            if legacy.exists():
+                path = legacy
+            else:
+                return 0
 
         existing_ids = {
             str(m.get("message_id"))
             for m in session.messages
             if m.get("role") == "user" and m.get("message_id")
         }
-        # Fallback dedupe when historical records don't have message_id.
         existing_content = {
             str(m.get("content", ""))
             for m in session.messages
@@ -133,6 +147,8 @@ class ChannelLogStore:
                     continue
 
                 if data.get("role") != "user":
+                    continue
+                if session.session_id and data.get("session_id") and data.get("session_id") != session.session_id:
                     continue
 
                 message_id = data.get("message_id")

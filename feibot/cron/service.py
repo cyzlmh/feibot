@@ -308,11 +308,13 @@ class CronService:
     @staticmethod
     def _identity_key(
         *,
+        kind: str,
         message: str,
         channel: str | None,
         to: str | None,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         return (
+            str(kind or "agent_turn"),
             _normalize_message_for_identity(message),
             str(channel or ""),
             str(to or ""),
@@ -323,6 +325,7 @@ class CronService:
         name: str,
         schedule: CronSchedule,
         message: str,
+        payload_kind: Literal["system_event", "agent_turn"] = "agent_turn",
         deliver: bool = False,
         channel: str | None = None,
         to: str | None = None,
@@ -339,11 +342,17 @@ class CronService:
         _validate_schedule_for_add(schedule)
         now = _now_ms()
 
-        target_identity = self._identity_key(message=message, channel=channel, to=to)
+        target_identity = self._identity_key(
+            kind=payload_kind,
+            message=message,
+            channel=channel,
+            to=to,
+        )
         matched = [
             job
             for job in store.jobs
             if self._identity_key(
+                kind=job.payload.kind,
                 message=job.payload.message,
                 channel=job.payload.channel,
                 to=job.payload.to,
@@ -380,7 +389,7 @@ class CronService:
                 keep.enabled = True
                 keep.schedule = schedule
                 keep.payload = CronPayload(
-                    kind="agent_turn",
+                    kind=payload_kind,
                     message=message,
                     deliver=deliver,
                     channel=channel,
@@ -406,7 +415,7 @@ class CronService:
             enabled=True,
             schedule=schedule,
             payload=CronPayload(
-                kind="agent_turn",
+                kind=payload_kind,
                 message=message,
                 deliver=deliver,
                 channel=channel,
