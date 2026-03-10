@@ -107,6 +107,18 @@ class BaseChannel(ABC):
             media: Optional list of media URLs.
             metadata: Optional channel-specific metadata.
         """
+        # Handle /chatid command for any user (even if not in allowFrom)
+        # This allows users to discover their ID to request access
+        if content and content.strip() == "/chatid":
+            await self.send(
+                OutboundMessage(
+                    channel=self.name,
+                    chat_id=chat_id,
+                    content=f"User ID: `{sender_id}`\nChat ID: `{chat_id}`",
+                )
+            )
+            return
+        
         if not self.is_allowed(sender_id):
             logger.warning(
                 f"Access denied for sender {sender_id} on channel {self.name}. "
