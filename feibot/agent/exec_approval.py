@@ -136,15 +136,16 @@ class ExecApprovalManager:
         return resolution, ""
 
     def describe_request_text(self, request: ExecApprovalRequest) -> str:
-        """Text fallback for channels without button callbacks."""
+        """Describe approvals without exposing a text-approval path."""
         expires_in = max(0, int((request.expires_at - datetime.now()).total_seconds()))
         return (
             "Exec approval required\n"
             f"ID: {request.id}\n"
             f"Command: {request.command}\n"
             f"CWD: {request.working_dir}\n"
+            f"Risk level: {request.risk_level}\n"
             f"Expires in: {expires_in}s\n"
-            "Reply with: /approve <id> allow-once|deny"
+            "Use the Feishu approval card to continue."
         )
 
     @staticmethod

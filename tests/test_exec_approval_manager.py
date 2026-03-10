@@ -20,9 +20,9 @@ def test_requester_only_approval_and_allow_once() -> None:
         chat_id="oc_1",
         session_key="feishu:oc_1",
         requester_id="ou_requester",
-        risk_level="hard-danger",
+        risk_level="dangerous",
     )
-    assert request.risk_level == "hard-danger"
+    assert request.risk_level == "dangerous"
 
     denied, denied_err = manager.resolve(
         approval_id=request.id,
@@ -41,7 +41,7 @@ def test_requester_only_approval_and_allow_once() -> None:
     assert err == ""
     assert resolved is not None
     assert resolved.decision == "allow-once"
-    assert resolved.request.risk_level == "hard-danger"
+    assert resolved.request.risk_level == "dangerous"
     assert manager.get_request(request.id) is None
 
 def test_configured_approver_can_resolve_others_request() -> None:

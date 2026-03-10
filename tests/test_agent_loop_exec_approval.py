@@ -99,7 +99,7 @@ async def test_exec_approval_pending_then_approve_resumes_blocked_loop(tmp_path:
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
     )
 
     response = await loop._process_message(
@@ -156,20 +156,127 @@ async def test_exec_approval_pending_then_approve_resumes_blocked_loop(tmp_path:
             chat_id="oc_group_1",
             content=f"/approve {approval_id} allow-once",
             metadata={
-                "msg_type": "text",
+                "msg_type": "interactive",
                 "message_id": "om_exec_2",
+                "_suppress_progress": True,
+                "source": "card_action",
+            },
+        )
+    )
+
+    assert approve_response is None
+
+    final_notice = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    assert final_notice.content == "done"
+    assert not target.exists()
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_rejects_manual_text_approve_for_card_flow(tmp_path: Path) -> None:
+    bus = MessageBus()
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    target = workspace / "cleanup_manual_text.txt"
+    target.write_text("trash", encoding="utf-8")
+    command = f"rm -f {target}"
+
+    provider = ExecApprovalProvider(command)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content="Please clean temp file",
+            metadata={
+                "msg_type": "text",
+                "message_id": "om_exec_text_1",
+                "_suppress_progress": True,
+            },
+        )
+    )
+
+    assert response is None
+    card_prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    approval_id = str(card_prompt.metadata.get("_exec_approval_id") or "")
+
+    approve_response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content=f"/approve {approval_id} allow-once",
+            metadata={
+                "msg_type": "text",
+                "message_id": "om_exec_text_2",
                 "_suppress_progress": True,
             },
         )
     )
 
     assert approve_response is not None
-    assert "allowed once" in approve_response.content
+    assert "Text approval is disabled" in approve_response.content
+    assert target.exists()
+    assert provider.calls == 1
 
-    final_notice = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    assert final_notice.content == "done"
+
+@pytest.mark.asyncio
+async def test_exec_confirm_mode_none_runs_without_hitl(tmp_path: Path) -> None:
+    bus = MessageBus()
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    target = workspace / "cleanup_none_mode.txt"
+    target.write_text("trash", encoding="utf-8")
+    command = f"rm -f {target}"
+
+    provider = ExecApprovalProvider(command)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(
+            approval_confirm_mode="none",
+            approval_dangerous_mode="feishu_card",
+        ),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content="Please clean temp file",
+            metadata={
+                "msg_type": "text",
+                "message_id": "om_exec_none_1",
+                "_suppress_progress": True,
+            },
+        )
+    )
+
+    assert response is not None
+    assert response.content == "done"
     assert not target.exists()
     assert provider.calls == 2
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(bus.consume_outbound(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -195,7 +302,7 @@ async def test_exec_approval_sim_auth_auto_allow_resumes_loop(
         memory_window=20,
         restrict_to_workspace=True,
         exec_config=ExecToolConfig(
-            approval_mode="sim_auth",
+            approval_confirm_mode="sim_auth",
             approval_sim_auth_url="https://sim-auth.local/verify",
         ),
     )
@@ -229,29 +336,15 @@ async def test_exec_approval_sim_auth_auto_allow_resumes_loop(
     assert provider.calls == 2
 
 
-@pytest.mark.asyncio
-async def test_exec_approval_sim_auth_missing_phone_falls_back_to_feishu_hitl(
-    tmp_path: Path,
-) -> None:
-    bus = MessageBus()
-    workspace = tmp_path / "ws"
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    target = workspace / "cleanup_sim_fallback.txt"
-    target.write_text("trash", encoding="utf-8")
-    command = f"rm -f {target}"
-
-    provider = ExecApprovalProvider(command)
+def test_sim_auth_mode_is_unavailable_without_requester_support(tmp_path: Path) -> None:
     loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=workspace,
+        bus=MessageBus(),
+        provider=ExecApprovalProvider("rm -f /tmp/unused"),
+        workspace=tmp_path,
         model="dummy/test-model",
-        max_iterations=5,
         memory_window=20,
-        restrict_to_workspace=True,
         exec_config=ExecToolConfig(
-            approval_mode="sim_auth",
+            approval_confirm_mode="sim_auth",
             approval_sim_auth_host="https://ptest.cmccsim.com:9090",
             approval_sim_auth_send_auth_path="/trustedAuth/api/simAuth/sendAuth",
             approval_sim_auth_get_result_path="/trustedAuth/api/simAuth/getSimAuthResult",
@@ -262,29 +355,21 @@ async def test_exec_approval_sim_auth_missing_phone_falls_back_to_feishu_hitl(
         ),
     )
 
-    response = await loop._process_message(
-        InboundMessage(
-            channel="feishu",
-            sender_id="ou_requester",
-            chat_id="oc_group_1",
-            content="Please clean temp file",
-            metadata={
-                "msg_type": "text",
-                "message_id": "om_exec_sim_fallback_1",
-                "_suppress_progress": True,
-            },
-        )
+    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="confirm") == "unavailable"
+
+
+def test_unset_approval_modes_default_to_none(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ExecApprovalProvider("rm -f /tmp/unused"),
+        workspace=tmp_path,
+        model="dummy/test-model",
+        memory_window=20,
+        exec_config=ExecToolConfig(),
     )
 
-    assert response is None
-    assert not loop._sim_auth_pending_ids
-    assert provider.calls == 1
-
-    card_prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    assert card_prompt.metadata is not None
-    assert card_prompt.metadata.get("_exec_approval_id")
-    assert isinstance(card_prompt.metadata.get("_feishu_card"), dict)
-    assert target.exists()
+    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="confirm") == "none"
+    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="dangerous") == "none"
 
 
 @pytest.mark.asyncio
@@ -307,7 +392,7 @@ async def test_exec_approval_sim_auth_auto_deny_stops_loop(monkeypatch, tmp_path
         memory_window=20,
         restrict_to_workspace=True,
         exec_config=ExecToolConfig(
-            approval_mode="sim_auth",
+            approval_confirm_mode="sim_auth",
             approval_sim_auth_url="https://sim-auth.local/verify",
         ),
     )
@@ -372,7 +457,7 @@ async def test_exec_approval_sim_auth_deny_reason_masks_success_word(monkeypatch
         memory_window=20,
         restrict_to_workspace=True,
         exec_config=ExecToolConfig(
-            approval_mode="sim_auth",
+            approval_confirm_mode="sim_auth",
             approval_sim_auth_url="https://sim-auth.local/verify",
         ),
     )
@@ -426,7 +511,7 @@ async def test_exec_approval_sim_auth_deny_prevents_next_turn_replay(
         memory_window=20,
         restrict_to_workspace=True,
         exec_config=ExecToolConfig(
-            approval_mode="sim_auth",
+            approval_confirm_mode="sim_auth",
             approval_sim_auth_url="https://sim-auth.local/verify",
         ),
     )
@@ -472,8 +557,25 @@ async def test_exec_approval_sim_auth_deny_prevents_next_turn_replay(
     assert target.exists()
 
 
+def test_dangerous_mode_inherits_stronger_confirm_mode(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ExecApprovalProvider("rm -f /tmp/unused"),
+        workspace=tmp_path,
+        model="dummy/test-model",
+        memory_window=20,
+        exec_config=ExecToolConfig(
+            approval_confirm_mode="sim_auth",
+            approval_dangerous_mode="feishu_card",
+            approval_sim_auth_url="https://sim-auth.local/verify",
+        ),
+    )
+
+    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="dangerous") == "sim_auth"
+
+
 @pytest.mark.asyncio
-async def test_exec_approval_hard_danger_mode_can_use_sim_auth(
+async def test_exec_approval_dangerous_mode_can_use_sim_auth(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -492,15 +594,15 @@ async def test_exec_approval_hard_danger_mode_can_use_sim_auth(
         memory_window=20,
         restrict_to_workspace=False,
         exec_config=ExecToolConfig(
-            approval_mode="text",
-            approval_hard_danger_mode="sim_auth",
+            approval_confirm_mode="none",
+            approval_dangerous_mode="sim_auth",
             approval_sim_auth_url="https://sim-auth.local/verify",
         ),
     )
 
     async def _fake_decision(request):  # noqa: ANN001
-        assert request.risk_level == "hard-danger"
-        return "deny", "hard-danger blocked by sim auth"
+        assert request.risk_level == "dangerous"
+        return "deny", "dangerous action blocked by sim auth"
 
     monkeypatch.setattr(loop, "_request_sim_auth_decision", _fake_decision)
 
@@ -523,5 +625,5 @@ async def test_exec_approval_hard_danger_mode_can_use_sim_auth(
 
     deny_notice = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
     assert "SimAuth denied exec approval" in deny_notice.content
-    assert "hard-danger blocked by sim auth" in deny_notice.content
+    assert "dangerous action blocked by sim auth" in deny_notice.content
     assert provider.calls == 1

@@ -6,6 +6,10 @@ from feibot.agent.exec_approval import ExecApprovalManager
 from feibot.agent.tools.shell import ExecTool
 
 
+def _card_mode(*_args: object) -> str:
+    return "feishu_card"
+
+
 @pytest.mark.asyncio
 async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -> None:
     manager = ExecApprovalManager(enabled=True, timeout_sec=120)
@@ -14,6 +18,7 @@ async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -
         working_dir=str(tmp_path),
         restrict_to_workspace=True,
         approval_manager=manager,
+        approval_mode_resolver=_card_mode,
     )
     tool.set_context(
         channel="feishu",
@@ -45,13 +50,14 @@ async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_exec_tool_requires_approval_for_hard_danger_pattern(tmp_path: Path) -> None:
+async def test_exec_tool_requires_approval_for_dangerous_pattern(tmp_path: Path) -> None:
     manager = ExecApprovalManager(enabled=True, timeout_sec=120)
     tool = ExecTool(
         timeout=5,
         working_dir=str(tmp_path),
         restrict_to_workspace=False,
         approval_manager=manager,
+        approval_mode_resolver=_card_mode,
     )
     tool.set_context(
         channel="feishu",
@@ -67,7 +73,7 @@ async def test_exec_tool_requires_approval_for_hard_danger_pattern(tmp_path: Pat
     assert approval_id is not None
     request = manager.get_request(approval_id)
     assert request is not None
-    assert request.risk_level == "hard-danger"
+    assert request.risk_level == "dangerous"
 
 
 @pytest.mark.asyncio
@@ -78,6 +84,7 @@ async def test_exec_tool_requires_approval_for_pipe_to_shell(tmp_path: Path) -> 
         working_dir=str(tmp_path),
         restrict_to_workspace=False,
         approval_manager=manager,
+        approval_mode_resolver=_card_mode,
     )
     tool.set_context(
         channel="feishu",

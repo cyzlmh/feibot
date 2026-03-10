@@ -20,6 +20,7 @@ async def test_litellm_provider_passes_reasoning_effort_from_env(monkeypatch) ->
                     finish_reason="stop",
                 )
             ],
+            model="openai/gpt-4o-mini-2026-01-01",
             usage=None,
         )
         return response, None
@@ -29,4 +30,9 @@ async def test_litellm_provider_passes_reasoning_effort_from_env(monkeypatch) ->
     result = await provider.chat(messages=[{"role": "user", "content": "hello"}])
 
     assert result.content == "ok"
+    assert result.model == "openai/gpt-4o-mini-2026-01-01"
+    assert result.provider_payload is not None
+    assert result.provider_payload["requested_model"] == "openai/gpt-4o-mini"
+    assert result.provider_payload["response_model"] == "openai/gpt-4o-mini-2026-01-01"
+    assert result.provider_payload["message"]["content"] == "ok"
     assert captured.get("reasoning_effort") == "high"

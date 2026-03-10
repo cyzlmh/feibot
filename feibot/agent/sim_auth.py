@@ -294,8 +294,15 @@ class SimAuthResolver:
 
     def can_verify_request(self, request: ExecApprovalRequest) -> bool:
         """Whether SIM-auth can be executed for this approval request."""
+        return self.can_verify_requester(request.requester_id)
+
+    def can_verify_requester(self, requester_id: str | None) -> bool:
+        """Whether SIM-auth can be executed for the requester identity."""
         if self.cmcc_enabled:
-            return bool(self._resolve_cmcc_msisdn(request))
+            for requester_token in self._split_sender_id_tokens(requester_id):
+                if self.cmcc_msisdn_map.get(requester_token):
+                    return True
+            return False
         return bool(self.verify_url)
 
     async def verify(self, request: ExecApprovalRequest) -> SimAuthDecision:

@@ -15,6 +15,8 @@ def test_get_history_preserves_tool_metadata() -> None:
             }
         ],
         reasoning_content="Need to inspect working tree first.",
+        model="openai/kimi-k2.5",
+        provider_payload={"requested_model": "openai/kimi-k2.5"},
     )
     session.add_message(
         "tool",
@@ -29,6 +31,8 @@ def test_get_history_preserves_tool_metadata() -> None:
     assert history[0] == {"role": "user", "content": "check repo status"}
     assert history[1]["tool_calls"][0]["function"]["name"] == "exec"
     assert history[1]["reasoning_content"] == "Need to inspect working tree first."
+    assert "model" not in history[1]
+    assert "provider_payload" not in history[1]
     assert history[2]["tool_call_id"] == "call_1"
     assert history[2]["name"] == "exec"
 

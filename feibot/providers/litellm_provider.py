@@ -158,6 +158,39 @@ class LiteLLMProvider(LLMProvider):
                     kwargs.update(overrides)
                     return
 
+    @classmethod
+    def _to_jsonable(cls, value: Any) -> Any:
+        """Convert LiteLLM/Pydantic response objects into plain JSON-safe data."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): cls._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._to_jsonable(v) for v in value]
+
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return cls._to_jsonable(model_dump())
+            except Exception:
+                pass
+
+        to_dict = getattr(value, "dict", None)
+        if callable(to_dict):
+            try:
+                return cls._to_jsonable(to_dict())
+            except Exception:
+                pass
+
+        if hasattr(value, "__dict__"):
+            return {
+                str(k): cls._to_jsonable(v)
+                for k, v in vars(value).items()
+                if not str(k).startswith("_")
+            }
+
+        return str(value)
+
     @staticmethod
     def _coerce_policy(policy: Any) -> dict[str, Any]:
         """Normalize policy object into a plain dict."""
@@ -453,7 +486,7 @@ class LiteLLMProvider(LLMProvider):
             max_delay=max_delay,
         )
         if response is not None:
-            return self._parse_response(response)
+            return self._parse_response(response, requested_model=primary_model)
 
         last_error = primary_error
 
@@ -487,16 +520,25 @@ class LiteLLMProvider(LLMProvider):
                 max_delay=max_delay,
             )
             if response is not None:
-                return self._parse_response(response)
+                return self._parse_response(response, requested_model=fallback_model)
             last_error = fallback_error or primary_error
 
         # Return error as content for graceful handling.
+        attempted_models = [primary_model]
+        if can_fallback and fallback_model:
+            attempted_models.append(fallback_model)
         return LLMResponse(
             content=f"Error calling LLM: {str(last_error) if last_error else 'unknown error'}",
             finish_reason="error",
+            model=attempted_models[-1] if attempted_models else None,
+            provider_payload={
+                "attempted_models": attempted_models,
+                "error_type": last_error.__class__.__name__ if last_error else None,
+                "error": str(last_error) if last_error else "unknown error",
+            },
         )
     
-    def _parse_response(self, response: Any) -> LLMResponse:
+    def _parse_response(self, response: Any, *, requested_model: str | None = None) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
         choice = response.choices[0]
         message = choice.message
@@ -527,6 +569,14 @@ class LiteLLMProvider(LLMProvider):
             }
         
         reasoning_content = getattr(message, "reasoning_content", None)
+        response_model = getattr(response, "model", None)
+        provider_payload = {
+            "requested_model": requested_model,
+            "response_model": str(response_model) if response_model else None,
+            "message": self._to_jsonable(message),
+            "finish_reason": choice.finish_reason or "stop",
+            "usage": usage or None,
+        }
         
         return LLMResponse(
             content=message.content,
@@ -534,6 +584,8 @@ class LiteLLMProvider(LLMProvider):
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
             reasoning_content=reasoning_content,
+            model=str(response_model or requested_model) if (response_model or requested_model) else None,
+            provider_payload={k: v for k, v in provider_payload.items() if v is not None},
         )
     
     def get_default_model(self) -> str:

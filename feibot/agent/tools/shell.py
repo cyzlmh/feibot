@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shlex
+from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
@@ -11,7 +12,7 @@ from typing import Any, Literal
 from feibot.agent.exec_approval import ExecApprovalManager
 from feibot.agent.tools.base import Tool
 
-RiskLevel = Literal["confirm", "hard-danger"]
+RiskLevel = Literal["confirm", "dangerous"]
 
 
 class ExecTool(Tool):
@@ -41,11 +42,12 @@ class ExecTool(Tool):
         allowed_dirs: list[str] | None = None,
         path_append: str = "",
         approval_manager: ExecApprovalManager | None = None,
+        approval_mode_resolver: Callable[[RiskLevel, str, str], str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
-            # Critical command patterns (hard deny).
+            # Critical command patterns (dangerous-risk approval).
             # Block disk utility commands, but avoid matching option flags like
             # "--format"/"--merge-output-format" used by tools such as yt-dlp.
             r"(?<!-)\b(format|mkfs(?:\.[\w-]+)?|diskpart)\b",
@@ -72,6 +74,7 @@ class ExecTool(Tool):
         self.allowed_dirs = [Path(d).expanduser().resolve() for d in (allowed_dirs or [])]
         self.path_append = path_append
         self.approval_manager = approval_manager
+        self.approval_mode_resolver = approval_mode_resolver
         self._channel_ctx: ContextVar[str] = ContextVar("exec_default_channel", default="")
         self._chat_id_ctx: ContextVar[str] = ContextVar("exec_default_chat_id", default="")
         self._sender_id_ctx: ContextVar[str] = ContextVar("exec_default_sender_id", default="")
@@ -123,7 +126,14 @@ class ExecTool(Tool):
         if guard_error:
             return guard_error
         risk_level = self._risk_level(command)
-        if not approval_granted and risk_level is not None:
+        approval_mode = self._resolve_approval_mode(risk_level)
+        if not approval_granted and risk_level is not None and approval_mode != "none":
+            if approval_mode == "unavailable":
+                channel = self._channel_ctx.get() or "unknown"
+                return (
+                    "Error: Command requires approval, but no supported approval workflow "
+                    f"is available for channel '{channel}'."
+                )
             if not self.approval_manager or not self.approval_manager.enabled:
                 return "Error: Command requires approval but approval workflow is disabled"
             request = self.approval_manager.create_request(
@@ -187,19 +197,40 @@ class ExecTool(Tool):
     def _should_request_approval(self, *, command: str, cwd: str) -> bool:
         if not self.approval_manager or not self.approval_manager.enabled:
             return False
-        return self._risk_level(command) is not None
+        risk_level = self._risk_level(command)
+        return risk_level is not None and self._resolve_approval_mode(risk_level) not in {
+            "none",
+            "unavailable",
+        }
+
+    def _resolve_approval_mode(self, risk_level: RiskLevel | None) -> str:
+        if risk_level is None:
+            return "none"
+        if self.approval_mode_resolver is None:
+            return "feishu_card"
+        mode = str(
+            self.approval_mode_resolver(
+                risk_level,
+                self._channel_ctx.get(),
+                self._sender_id_ctx.get(),
+            )
+            or "feishu_card"
+        ).strip().lower()
+        if mode in {"none", "feishu_card", "sim_auth", "unavailable"}:
+            return mode
+        return "feishu_card"
 
     def _requires_confirmation(self, command: str) -> bool:
         lower = command.strip().lower()
         return any(re.search(pattern, lower) for pattern in self.confirm_patterns)
 
-    def _is_hard_danger(self, command: str) -> bool:
+    def _is_dangerous(self, command: str) -> bool:
         lower = command.strip().lower()
         return any(re.search(pattern, lower) for pattern in self.deny_patterns)
 
     def _risk_level(self, command: str) -> RiskLevel | None:
-        if self._is_hard_danger(command):
-            return "hard-danger"
+        if self._is_dangerous(command):
+            return "dangerous"
         if self._requires_confirmation(command):
             return "confirm"
         return None

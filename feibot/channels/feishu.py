@@ -550,7 +550,7 @@ class FeishuChannel(BaseChannel):
         decision_text = "Allowed once" if approved else "Denied"
         decision_marker = "[ALLOW]" if approved else "[DENY]"
         card_template = "green" if approved else "red"
-        risk_label = "hard-danger" if risk_level == "hard-danger" else "confirm"
+        risk_label = "dangerous" if risk_level == "dangerous" else "confirm"
         command_block = cls._format_command_as_markdown(command_preview)
         cwd_text = f"`{working_dir}`" if working_dir else "`(not available)`"
         return {
@@ -613,7 +613,7 @@ class FeishuChannel(BaseChannel):
         command_preview = str(value.get("command_preview") or "").strip()
         working_dir = str(value.get("working_dir") or "").strip()
         risk_level = str(value.get("risk_level") or "").strip().lower()
-        if risk_level != "hard-danger":
+        if risk_level != "dangerous":
             risk_level = "confirm"
         if not approval_id or decision not in {"allow-once", "deny"}:
             logger.warning("Invalid Feishu exec approval payload: {}", value)

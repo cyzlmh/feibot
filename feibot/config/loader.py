@@ -57,6 +57,13 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+    if "approvalConfirmMode" not in exec_cfg and "approvalMode" in exec_cfg:
+        exec_cfg["approvalConfirmMode"] = exec_cfg.pop("approvalMode")
+    if "approvalDangerousMode" not in exec_cfg and "approvalHardDangerMode" in exec_cfg:
+        exec_cfg["approvalDangerousMode"] = exec_cfg.pop("approvalHardDangerMode")
+    for key in ("approvalConfirmMode", "approvalDangerousMode"):
+        if str(exec_cfg.get(key) or "").strip().lower() == "text":
+            exec_cfg[key] = "feishu_card"
     return data
 
 

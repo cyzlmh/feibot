@@ -451,7 +451,7 @@ async def test_on_card_action_sync_routes_to_approve_command(monkeypatch, tmp_pa
                     "decision": "allow-once",
                     "command_preview": "rm ./tmp/file.txt",
                     "working_dir": "/workspace/feibot",
-                    "risk_level": "hard-danger",
+                    "risk_level": "dangerous",
                 }
             ),
             operator=SimpleNamespace(open_id="ou_1", user_id=""),
@@ -468,7 +468,7 @@ async def test_on_card_action_sync_routes_to_approve_command(monkeypatch, tmp_pa
     assert "read-only" in card_text
     assert "Allowed once" in card_text
     assert "rm ./tmp/file.txt" in card_text
-    assert "hard-danger" in card_text
+    assert "dangerous" in card_text
     assert captured["sender_id"] == "ou_1"
     assert captured["chat_id"] == "oc_1"
     assert captured["content"] == "/approve abc123 allow-once"

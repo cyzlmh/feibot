@@ -108,6 +108,7 @@ class AgentLoop:
     PENDING_FILES_METADATA_KEY = "pending_files"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
     _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card", "sim_auth"}
+    _APPROVAL_MODE_STRENGTH = {"none": 0, "feishu_card": 1, "sim_auth": 2}
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
@@ -250,13 +251,22 @@ class AgentLoop:
         self._register_default_tools()
 
     @classmethod
-    def _normalize_approval_mode_value(cls, raw: Any, *, fallback: str = "feishu_card") -> str:
+    def _normalize_approval_mode_value(cls, raw: Any, *, fallback: str = "none") -> str:
         mode = str(raw or "").strip().lower()
         if mode == "text":
             mode = "feishu_card"
         if mode in cls._SUPPORTED_APPROVAL_MODES:
             return mode
         return fallback
+
+    @classmethod
+    def _max_approval_mode(cls, *modes: str) -> str:
+        strongest = "none"
+        for mode in modes:
+            normalized = cls._normalize_approval_mode_value(mode, fallback="none")
+            if cls._APPROVAL_MODE_STRENGTH[normalized] > cls._APPROVAL_MODE_STRENGTH[strongest]:
+                strongest = normalized
+        return strongest
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -277,8 +287,9 @@ class AgentLoop:
             allowed_dirs=self.allowed_dirs,
             path_append=self.exec_config.path_append,
             approval_manager=self.exec_approvals,
-            approval_mode_resolver=lambda risk_level, channel: self._approval_mode(
+            approval_mode_resolver=lambda risk_level, channel, sender_id: self._approval_mode(
                 channel,
+                sender_id=sender_id,
                 risk_level=risk_level,
             ),
         ))
@@ -470,44 +481,47 @@ class AgentLoop:
             return text
         return f"{text[: max_chars - 3]}..."
 
-    def _approval_mode(self, channel: str, *, risk_level: str = "confirm") -> str:
-        base_mode = self._normalize_approval_mode_value(
-            getattr(self.exec_config, "approval_mode", "feishu_card"),
-            fallback="feishu_card",
+    def _approval_mode(
+        self,
+        channel: str,
+        *,
+        sender_id: str = "",
+        risk_level: str = "confirm",
+    ) -> str:
+        if not bool(getattr(self.exec_config, "approval_enabled", True)):
+            return "none"
+
+        confirm_mode = self._normalize_approval_mode_value(
+            getattr(self.exec_config, "approval_confirm_mode", ""),
+            fallback="none",
         )
-        if risk_level == "hard-danger":
-            hard_mode_raw = str(getattr(self.exec_config, "approval_hard_danger_mode", "") or "").strip()
-            mode = self._normalize_approval_mode_value(hard_mode_raw, fallback="")
-            if not mode:
-                mode = "feishu_card" if base_mode == "none" else base_mode
+        dangerous_mode = self._normalize_approval_mode_value(
+            getattr(self.exec_config, "approval_dangerous_mode", ""),
+            fallback="none",
+        )
+
+        if risk_level == "dangerous":
+            mode = self._max_approval_mode(confirm_mode, dangerous_mode)
         else:
-            mode = base_mode
+            mode = confirm_mode
+
+        if mode == "none":
+            return mode
         if mode == "feishu_card" and channel != "feishu":
             return "unavailable"
-        if mode == "sim_auth" and not self.sim_auth_resolver.enabled:
-            if not self._sim_auth_warned_missing_config:
+        if mode == "sim_auth" and not self.sim_auth_resolver.can_verify_requester(sender_id):
+            if not self._sim_auth_warned_missing_config and not self.sim_auth_resolver.enabled:
                 logger.warning(
-                    "Exec approval mode is sim_auth but SIM-auth config is incomplete; falling back to Feishu card approval."
+                    "Exec approval mode is sim_auth but SIM-auth config is incomplete."
                 )
                 self._sim_auth_warned_missing_config = True
-            return "feishu_card" if channel == "feishu" else "unavailable"
+            return "unavailable"
         return mode
-
-    def _should_fallback_to_feishu_hitl(self, request: ExecApprovalRequest) -> bool:
-        if request.channel != "feishu":
-            return False
-        mode = self._approval_mode(
-            request.channel,
-            risk_level=str(request.risk_level or "confirm"),
-        )
-        if mode != "sim_auth":
-            return False
-        return not self.sim_auth_resolver.can_verify_request(request)
 
     def _build_exec_approval_card(self, request: ExecApprovalRequest) -> dict[str, Any]:
         command_block = self._format_command_as_markdown(request.command)
         command_preview = self._build_command_preview(request.command)
-        risk_label = "hard-danger" if str(request.risk_level).strip().lower() == "hard-danger" else "confirm"
+        risk_label = "dangerous" if str(request.risk_level).strip().lower() == "dangerous" else "confirm"
         callback_value_base = {
             "type": "exec_approval",
             "approval_id": request.id,
@@ -601,15 +615,15 @@ class AgentLoop:
     def _is_feishu_card_approval_enabled(self, request: ExecApprovalRequest) -> bool:
         mode = self._approval_mode(
             request.channel,
+            sender_id=request.requester_id,
             risk_level=str(request.risk_level or "confirm"),
         )
-        if mode == "feishu_card":
-            return True
-        return self._should_fallback_to_feishu_hitl(request)
+        return mode == "feishu_card"
 
     def _is_sim_auth_approval_enabled(self, request: ExecApprovalRequest) -> bool:
         if self._approval_mode(
             request.channel,
+            sender_id=request.requester_id,
             risk_level=str(request.risk_level or "confirm"),
         ) != "sim_auth":
             return False

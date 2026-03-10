@@ -25,6 +25,13 @@
 ⏹ Stopped 1 task(s).
 ```
 
+通过 `/go` 命令继续上一次因工具循环保护或审批中断而暂停的任务。
+
+```
+用户：/go
+继续基于当前上下文推进未完成任务
+```
+
 ---
 
 ### 3. 工具调用一致性校验
@@ -33,27 +40,47 @@
 
 ---
 
-### 4. 三级执行审批
+### 4. 执行审批工作流
 
 敏感操作需审批后执行。
 
-#### Level 1: 简单放通
-```json
-{ "exec_approval": { "enabled": true, "mode": "text" } }
-```
-回复 `/approve` 或 `/deny` 审批。
+Exec 命令按风险分为三类：
+- `safe`：直接执行，不插入 HITL
+- `confirm`：由 `approvalConfirmMode` 控制
+- `dangerous`：由 `approvalDangerousMode` 控制，但实际生效模式会提升为 `max(confirm, dangerous)`
 
-#### Level 2: 飞书卡片
-```json
-{ "exec_approval": { "enabled": true, "mode": "feishu_card", "approvers": ["ou_xxx"] } }
-```
-审批人收到卡片一键审批。
+只保留两种 HITL 方式：`feishu_card` 和 `sim_auth`。文本 `/approve` 已移除，仅保留卡片回调入口。
 
-#### Level 3: SIM 卡认证
+如果某一类没有配置模式（空字符串）或显式设为 `none`，该类命令不会插入 HITL。
+
+#### 示例 1：仅 dangerous 走飞书卡片
 ```json
-{ "exec_approval": { "enabled": true, "mode": "sim_auth" } }
+{
+  "tools": {
+    "exec": {
+      "approvalEnabled": true,
+      "approvalConfirmMode": "none",
+      "approvalDangerousMode": "feishu_card",
+      "approvalApprovers": ["ou_xxx"]
+    }
+  }
+}
 ```
-需手机号二次确认，支持 CMCC SM2 签名验证。
+普通 `confirm` 风险命令直接执行，`dangerous` 仍需飞书卡片审批。
+
+#### 示例 2：confirm 和 dangerous 都走 SIM 卡认证
+```json
+{
+  "tools": {
+    "exec": {
+      "approvalEnabled": true,
+      "approvalConfirmMode": "sim_auth",
+      "approvalDangerousMode": "sim_auth"
+    }
+  }
+}
+```
+需手机号二次确认，支持 CMCC SM2 签名验证。若 `dangerous` 配得比 `confirm` 更弱，会自动提升到不低于 `confirm` 的级别。
 
 **触发审批的命令**：`rm`, `git push`, `docker`, `sudo`, `curl` 等。
 
@@ -141,19 +168,31 @@ uv run feibot --config ./config.json gateway
 
 ```json
 {
-  "model": "gpt-4o",
+  "name": "feibot",
+  "paths": {
+    "workspace": "./workspace",
+    "sessions": "./sessions"
+  },
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-4o"
+    }
+  },
   "channels": {
     "feishu": {
       "enabled": true,
-      "app_id": "cli_xxx",
-      "app_secret": "xxx",
-      "allow_from": ["ou_xxx"]
+      "appId": "cli_xxx",
+      "appSecret": "xxx",
+      "allowFrom": ["ou_xxx"]
     }
   },
-  "exec_approval": {
-    "enabled": true,
-    "mode": "feishu_card",
-    "approvers": ["ou_xxx"]
+  "tools": {
+    "exec": {
+      "approvalEnabled": true,
+      "approvalConfirmMode": "none",
+      "approvalDangerousMode": "feishu_card",
+      "approvalApprovers": ["ou_xxx"]
+    }
   }
 }
 ```
@@ -168,7 +207,7 @@ uv run feibot --config ./config.json gateway
 | 工具提示 | ❌ | ✅ |
 | 任务取消 | ❌ | ✅ `/stop` 命令 |
 | 工具一致性校验 | ❌ | ✅ |
-| 执行审批 | ❌ | 三级 |
+| 执行审批 | ❌ | 按风险分级 + 可配置 HITL |
 | 操作日志 | ❌ | ✅ Channel Log |
 | 强制配置 | ❌ | ✅ |
 | 子任务群聊 | ❌ | ✅ |

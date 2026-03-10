@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,12 @@ def test_append_session_history_skips_empty_assistant_without_tool_calls(tmp_pat
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [{"id": "call_1", "function": {"name": "exec", "arguments": "{}"}}],
+                "model": "openai/kimi-k2.5",
+                "provider_payload": {
+                    "requested_model": "openai/kimi-k2.5",
+                    "response_model": "openai/kimi-k2.5",
+                    "message": {"content": ""},
+                },
             },
             {"role": "assistant", "content": "done"},
         ],
@@ -53,6 +60,9 @@ def test_append_session_history_skips_empty_assistant_without_tool_calls(tmp_pat
 
     assert len(session.messages) == 2
     assert session.messages[0].get("tool_calls")
+    assert session.messages[0]["model"] == "openai/kimi-k2.5"
+    assert session.messages[0]["provider_payload"]["requested_model"] == "openai/kimi-k2.5"
+    assert session.messages[0]["provider_payload"]["message"]["content"] == ""
     assert session.messages[1]["content"] == "done"
 
 
@@ -67,7 +77,19 @@ async def test_llm_error_response_not_persisted_to_session(monkeypatch, tmp_path
         on_progress=None,
         disabled_tools=None,
     ):
-        return "provider error", [], {"stopped_reason": "llm_error", "history_messages": []}
+        return "provider error", [], {
+            "stopped_reason": "llm_error",
+            "history_messages": [],
+            "last_llm_response": {
+                "model": "openai/gpt-5.3-codex",
+                "provider_payload": {
+                    "requested_model": "openai/gpt-5.3-codex",
+                    "attempted_models": ["openai/gpt-5.3-codex"],
+                    "error_type": "UnsupportedParamsError",
+                    "error": "not supported when using Codex with a ChatGPT account",
+                },
+            },
+        }
 
     monkeypatch.setattr(loop, "_run_agent_loop", _fake_run_agent_loop)
 
@@ -85,3 +107,8 @@ async def test_llm_error_response_not_persisted_to_session(monkeypatch, tmp_path
     assert resp.content == "provider error"
     session = loop.sessions.get_or_create("feishu:ou_test")
     assert [m["role"] for m in session.messages] == ["user"]
+    raw_log_path = loop.channel_logs._get_log_path("feishu:ou_test")
+    entries = [json.loads(line) for line in raw_log_path.read_text(encoding="utf-8").splitlines()]
+    assert entries[-1]["role"] == "assistant"
+    assert entries[-1]["metadata"]["model"] == "openai/gpt-5.3-codex"
+    assert entries[-1]["metadata"]["provider_payload"]["requested_model"] == "openai/gpt-5.3-codex"
