@@ -49,3 +49,22 @@ def test_system_prompt_contains_only_group_chat_spawn_policy_for_oc_chat(tmp_pat
     assert "Feishu group chat" in prompt
     assert "do not auto-spawn unless the user explicitly asks" in prompt
     assert "call `spawn` early" not in prompt
+
+
+def test_system_prompt_does_not_preload_long_term_memory(tmp_path: Path) -> None:
+    ctx = ContextBuilder(tmp_path)
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(
+        "## Technical Notes\n- SwanLab logging issue exists in nanochat.\n",
+        encoding="utf-8",
+    )
+
+    prompt = ctx.build_system_prompt(
+        current_message="好的，先去掉v1 然后重启，我再试试",
+        channel="feishu",
+        chat_id="oc_group_1",
+    )
+
+    assert "SwanLab logging issue exists in nanochat." not in prompt
+    assert "Long-term memory is not preloaded into the prompt." in prompt

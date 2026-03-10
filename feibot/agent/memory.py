@@ -58,6 +58,10 @@ class MemoryStore:
                     normalized.append(sub)
         return normalized
 
+    @staticmethod
+    def _normalize_query(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+
     def get_memory_context(
         self,
         query: str | None = None,
@@ -69,7 +73,8 @@ class MemoryStore:
         Build memory context for the current turn.
 
         If query is provided, select top relevant memory blocks to reduce
-        prompt noise. Falls back to a truncated full memory excerpt.
+        prompt noise. When nothing matches, return no memory instead of
+        injecting an unrelated excerpt.
         """
         long_term = self.read_long_term().strip()
         if not long_term:
@@ -84,21 +89,24 @@ class MemoryStore:
             excerpt = long_term[:max_chars].strip()
             return f"## Long-term Memory\n{excerpt}"
 
-        query_tokens = self._tokenize(query)
-        query_lower = query.lower()
+        normalized_query = self._normalize_query(query)
+        query_tokens = self._tokenize(normalized_query)
+        if not query_tokens:
+            return ""
+
+        query_lower = normalized_query.lower()
         scored: list[tuple[int, int, str]] = []
 
         for idx, block in enumerate(blocks):
             block_tokens = self._tokenize(block)
             overlap = len(query_tokens & block_tokens)
-            phrase_bonus = 2 if query_lower and query_lower in block.lower() else 0
+            phrase_bonus = 2 if len(query_lower) >= 4 and query_lower in block.lower() else 0
             score = overlap + phrase_bonus
             if score > 0:
                 scored.append((score, idx, block))
 
         if not scored:
-            excerpt = long_term[:max_chars].strip()
-            return f"## Long-term Memory\n{excerpt}"
+            return ""
 
         # Keep strongest matches, then restore original order for readability.
         top = sorted(scored, key=lambda x: (-x[0], x[1]))[:max_blocks]

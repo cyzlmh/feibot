@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from feibot.agent.memory import MemoryStore
 from feibot.agent.skills import SkillsLoader
 
 
@@ -16,8 +15,8 @@ class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
     
-    Assembles bootstrap files, memory, skills, and conversation history
-    into a coherent prompt for the LLM.
+    Assembles bootstrap files, skills, and conversation history into
+    a coherent prompt for the LLM.
     """
     
     BOOTSTRAP_FILES = ["AGENTS.md", "TOOLS.md"]
@@ -26,7 +25,6 @@ class ContextBuilder:
     
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
     
     def build_system_prompt(
@@ -37,7 +35,7 @@ class ContextBuilder:
         chat_id: str | None = None,
     ) -> str:
         """
-        Build the system prompt from bootstrap files, memory, and skills.
+        Build the system prompt from bootstrap files and skills.
         
         Args:
             skill_names: Optional list of skills to include.
@@ -56,12 +54,7 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-        
-        # Memory context
-        memory = self.memory.get_memory_context(query=current_message)
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
-        
+
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
@@ -133,6 +126,8 @@ Always be helpful, accurate, and concise. When using tools, think step by step: 
 For code explanation/debugging tasks, prefer find_file + grep_text + read_file before using exec.
 Use exec mainly for commands that cannot be done with dedicated tools.
 {spawn_policy_text}
+Use the current session history as your primary context.
+Long-term memory is not preloaded into the prompt. If the user asks about prior preferences, earlier decisions, or what you remember, inspect {workspace_path}/memory/MEMORY.md or grep {workspace_path}/memory/HISTORY.md explicitly.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
 

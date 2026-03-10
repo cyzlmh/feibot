@@ -107,9 +107,11 @@ class AgentLoop:
     MEMORY_TOOL_RESULT_MAX_CHARS = 300
     PENDING_FILES_METADATA_KEY = "pending_files"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
+    _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card", "sim_auth"}
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
+        "/go — Continue the previous unfinished task\n"
         "/stop — Stop the current task\n"
         "/help — Show available commands\n"
         "/chatid — Show your user/chat IDs\n"
@@ -247,6 +249,15 @@ class AgentLoop:
         self._sim_auth_warned_missing_config = False
         self._register_default_tools()
 
+    @classmethod
+    def _normalize_approval_mode_value(cls, raw: Any, *, fallback: str = "feishu_card") -> str:
+        mode = str(raw or "").strip().lower()
+        if mode == "text":
+            mode = "feishu_card"
+        if mode in cls._SUPPORTED_APPROVAL_MODES:
+            return mode
+        return fallback
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
@@ -266,6 +277,10 @@ class AgentLoop:
             allowed_dirs=self.allowed_dirs,
             path_append=self.exec_config.path_append,
             approval_manager=self.exec_approvals,
+            approval_mode_resolver=lambda risk_level, channel: self._approval_mode(
+                channel,
+                risk_level=risk_level,
+            ),
         ))
 
         # Web tools
@@ -456,26 +471,26 @@ class AgentLoop:
         return f"{text[: max_chars - 3]}..."
 
     def _approval_mode(self, channel: str, *, risk_level: str = "confirm") -> str:
+        base_mode = self._normalize_approval_mode_value(
+            getattr(self.exec_config, "approval_mode", "feishu_card"),
+            fallback="feishu_card",
+        )
         if risk_level == "hard-danger":
-            hard_mode_raw = str(
-                getattr(self.exec_config, "approval_hard_danger_mode", "") or ""
-            ).strip().lower()
-            mode = hard_mode_raw if hard_mode_raw in {"text", "feishu_card", "sim_auth"} else ""
+            hard_mode_raw = str(getattr(self.exec_config, "approval_hard_danger_mode", "") or "").strip()
+            mode = self._normalize_approval_mode_value(hard_mode_raw, fallback="")
             if not mode:
-                mode = str(getattr(self.exec_config, "approval_mode", "text") or "text").strip().lower()
+                mode = "feishu_card" if base_mode == "none" else base_mode
         else:
-            mode = str(getattr(self.exec_config, "approval_mode", "text") or "text").strip().lower()
-        if mode not in {"text", "feishu_card", "sim_auth"}:
-            mode = "text"
+            mode = base_mode
         if mode == "feishu_card" and channel != "feishu":
-            return "text"
+            return "unavailable"
         if mode == "sim_auth" and not self.sim_auth_resolver.enabled:
             if not self._sim_auth_warned_missing_config:
                 logger.warning(
-                    "Exec approval mode is sim_auth but SIM-auth config is incomplete; falling back to manual approval."
+                    "Exec approval mode is sim_auth but SIM-auth config is incomplete; falling back to Feishu card approval."
                 )
                 self._sim_auth_warned_missing_config = True
-            return "feishu_card" if channel == "feishu" else "text"
+            return "feishu_card" if channel == "feishu" else "unavailable"
         return mode
 
     def _should_fallback_to_feishu_hitl(self, request: ExecApprovalRequest) -> bool:
@@ -1127,7 +1142,7 @@ class AgentLoop:
             f"已执行工具: {done}\n"
             "最近观察:\n"
             f"{obs}\n\n"
-            "如果你希望继续，请回复“继续”。我会基于当前进展继续推进。"
+            "如果你希望继续，请发送 `/go`。我会基于当前进展继续推进。"
         )
 
     def _is_tool_error_result(self, result: str | None) -> bool:
@@ -1163,6 +1178,23 @@ class AgentLoop:
             extra = {k: v for k, v in item.items() if k not in {"role", "content", "timestamp"}}
             session.add_message(role, content, **extra)
 
+    @staticmethod
+    def _llm_response_log_fields(response: Any | None) -> dict[str, Any]:
+        """Extract persistent per-turn LLM metadata for session/raw logs."""
+        if response is None:
+            return {}
+
+        extra: dict[str, Any] = {}
+        model = getattr(response, "model", None)
+        if isinstance(model, str) and model.strip():
+            extra["model"] = model
+
+        provider_payload = getattr(response, "provider_payload", None)
+        if isinstance(provider_payload, dict) and provider_payload:
+            extra["provider_payload"] = copy.deepcopy(provider_payload)
+
+        return extra
+
     def _record_debug_entry(
         self,
         debug_log: list[dict[str, Any]] | None,
@@ -1185,13 +1217,19 @@ class AgentLoop:
                     "arguments": copy.deepcopy(tc.arguments),
                 })
 
+        log_fields = self._llm_response_log_fields(response)
+        requested_model = self.model
+        provider_payload = log_fields.get("provider_payload")
+        if isinstance(provider_payload, dict):
+            requested_model = str(provider_payload.get("requested_model") or requested_model)
+
         debug_log.append({
             "call_id": f"{source}:{iteration}:{len(debug_log) + 1}",
             "timestamp": datetime.now().isoformat(),
             "source": source,
             "iteration": iteration,
             "request": {
-                "model": self.model,
+                "model": requested_model,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
                 "message_count": len(messages),
@@ -1205,6 +1243,8 @@ class AgentLoop:
                 "finish_reason": response.finish_reason,
                 "usage": copy.deepcopy(response.usage),
                 "reasoning_content": response.reasoning_content,
+                "model": log_fields.get("model"),
+                "provider_payload": provider_payload,
             },
         })
 
@@ -1236,6 +1276,17 @@ class AgentLoop:
         repeated_tool_calls = 0
         recent_signatures: list[str] = []
         consecutive_tool_errors = 0
+        last_llm_response: dict[str, Any] | None = None
+
+        def _build_loop_meta(stopped_reason: str, **extra: Any) -> dict[str, Any]:
+            meta: dict[str, Any] = {
+                "stopped_reason": stopped_reason,
+                "history_messages": history_messages,
+            }
+            if last_llm_response:
+                meta["last_llm_response"] = copy.deepcopy(last_llm_response)
+            meta.update(extra)
+            return meta
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -1253,6 +1304,9 @@ class AgentLoop:
             )
 
             self._record_debug_entry(debug_log, messages, tool_defs, response, iteration=iteration, source="main_loop")
+            response_log_fields = self._llm_response_log_fields(response)
+            if response_log_fields:
+                last_llm_response = copy.deepcopy(response_log_fields)
 
             if response.has_tool_calls:
                 if on_progress:
@@ -1281,6 +1335,7 @@ class AgentLoop:
                 }
                 if response.reasoning_content:
                     assistant_turn["reasoning_content"] = response.reasoning_content
+                assistant_turn.update(response_log_fields)
                 history_messages.append(assistant_turn)
 
                 messages = self.context.add_assistant_message(
@@ -1326,11 +1381,7 @@ class AgentLoop:
                             "content": final_content,
                             "tools_used": tools_used if tools_used else None,
                         })
-                        loop_meta = {
-                            "stopped_reason": "loop_guard",
-                            "pending_task": user_goal,
-                            "history_messages": history_messages,
-                        }
+                        loop_meta = _build_loop_meta("loop_guard", pending_task=user_goal)
                         return final_content, tools_used, loop_meta
 
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -1393,13 +1444,12 @@ class AgentLoop:
                                 "content": final_content,
                                 "tools_used": tools_used if tools_used else None,
                             })
-                        loop_meta = {
-                            "stopped_reason": "exec_approval_pending",
-                            "pending_approval_id": pending_approval_id,
-                            "history_messages": history_messages,
-                            "resume_messages": copy.deepcopy(messages),
-                            "resume_base_history_messages": base_history_messages,
-                        }
+                        loop_meta = _build_loop_meta(
+                            "exec_approval_pending",
+                            pending_approval_id=pending_approval_id,
+                            resume_messages=copy.deepcopy(messages),
+                            resume_base_history_messages=base_history_messages,
+                        )
                         return final_content, tools_used, loop_meta
 
                     if tool_call.name == "spawn" and not self._is_tool_error_result(result):
@@ -1409,10 +1459,7 @@ class AgentLoop:
                             "content": final_content,
                             "tools_used": tools_used if tools_used else None,
                         })
-                        loop_meta = {
-                            "stopped_reason": "spawn_finish",
-                            "history_messages": history_messages,
-                        }
+                        loop_meta = _build_loop_meta("spawn_finish")
                         return final_content, tools_used, loop_meta
 
                     if consecutive_tool_errors >= 3:
@@ -1427,11 +1474,7 @@ class AgentLoop:
                             "content": final_content,
                             "tools_used": tools_used if tools_used else None,
                         })
-                        loop_meta = {
-                            "stopped_reason": "error_threshold",
-                            "pending_task": user_goal,
-                            "history_messages": history_messages,
-                        }
+                        loop_meta = _build_loop_meta("error_threshold", pending_task=user_goal)
                         return final_content, tools_used, loop_meta
 
                     if tool_call.name == "message":
@@ -1439,10 +1482,7 @@ class AgentLoop:
                         if isinstance(message_tool, MessageTool) and message_tool.finish_requested:
                             content_arg = tool_call.arguments.get("content")
                             final_content = str(content_arg).strip() if content_arg is not None else ""
-                            loop_meta = {
-                                "stopped_reason": "message_finish",
-                                "history_messages": history_messages,
-                            }
+                            loop_meta = _build_loop_meta("message_finish")
                             return final_content or "Message sent.", tools_used, loop_meta
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
@@ -1450,19 +1490,13 @@ class AgentLoop:
                 if response.finish_reason == "error":
                     logger.error("LLM returned error: {}", (clean or response.content or "")[:200])
                     final_content = clean or response.content or "Sorry, I encountered an error calling the AI model."
-                    loop_meta = {
-                        "stopped_reason": "llm_error",
-                        "history_messages": history_messages,
-                    }
+                    loop_meta = _build_loop_meta("llm_error")
                     break
 
                 final_candidate = clean or response.content
                 if not final_candidate:
                     final_content = "I've completed processing but have no response to give."
-                    loop_meta = {
-                        "stopped_reason": "empty_response",
-                        "history_messages": history_messages,
-                    }
+                    loop_meta = _build_loop_meta("empty_response")
                     break
 
                 final_content = final_candidate
@@ -1474,11 +1508,9 @@ class AgentLoop:
                     assistant_final["reasoning_content"] = response.reasoning_content
                 if tools_used:
                     assistant_final["tools_used"] = tools_used
+                assistant_final.update(response_log_fields)
                 history_messages.append(assistant_final)
-                loop_meta = {
-                    "stopped_reason": "completed",
-                    "history_messages": history_messages,
-                }
+                loop_meta = _build_loop_meta("completed")
                 break
 
         if final_content is None:
@@ -1493,11 +1525,7 @@ class AgentLoop:
                 "content": final_content,
                 "tools_used": tools_used if tools_used else None,
             })
-            loop_meta = {
-                "stopped_reason": "max_iterations",
-                "pending_task": user_goal,
-                "history_messages": history_messages,
-            }
+            loop_meta = _build_loop_meta("max_iterations", pending_task=user_goal)
 
         if "history_messages" not in loop_meta:
             loop_meta["history_messages"] = history_messages
@@ -1825,6 +1853,12 @@ class AgentLoop:
             )
         if cmd == "/approve":
             is_card_action = str((msg.metadata or {}).get("source") or "") == "card_action"
+            if not is_card_action:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="❌ Text approval is disabled. Use the Feishu approval card.",
+                )
             approval_id, decision = self._parse_approve_args(cmd_args)
             if not approval_id or not decision:
                 return OutboundMessage(
@@ -1911,7 +1945,7 @@ class AgentLoop:
             )
 
         effective_content = msg.content
-        if cmd in {"继续", "continue"}:
+        if cmd in {"/go", "继续", "continue"}:
             pending_task = session.metadata.get("pending_task")
             if isinstance(pending_task, str) and pending_task.strip():
                 effective_content = f"Continue unfinished task with current context: {pending_task}"
@@ -2005,6 +2039,7 @@ class AgentLoop:
 
         debug_log: list[dict[str, Any]] | None = [] if self.debug else None
         if msg_type in {"text", "post"} and cmd not in {
+            "/go",
             "/new",
             "/stop",
             "/help",
@@ -2080,6 +2115,11 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
         history_messages = loop_meta.get("history_messages") if isinstance(loop_meta, dict) else None
+        assistant_log_metadata = None
+        if isinstance(loop_meta, dict):
+            last_llm_response = loop_meta.get("last_llm_response")
+            if isinstance(last_llm_response, dict) and last_llm_response:
+                assistant_log_metadata = copy.deepcopy(last_llm_response)
         if stop_reason != "exec_approval_pending":
             if isinstance(history_messages, list) and history_messages:
                 self._append_session_history(session, history_messages)
@@ -2097,6 +2137,7 @@ class AgentLoop:
                     timestamp=datetime.now().isoformat(),
                     channel=msg.channel,
                     chat_id=msg.chat_id,
+                    metadata=assistant_log_metadata,
                 ),
             )
         if self.debug and debug_log:
