@@ -302,13 +302,14 @@ Rules:
 
     def _render_review(self, items: list[tuple[Session, MemoryCandidate]]) -> str:
         lines = [
-            "# Memory Review",
+            "# Reflection Notes",
             "",
-            "These are recommendations only. Do not merge them into MEMORY.md without explicit user approval.",
+            "Possible durable memory items observed during nightly reflection.",
+            "These are notes only. Do not merge them into MEMORY.md without explicit user approval.",
             "",
         ]
         if not items:
-            lines.append("No new memory candidates from the latest history sync.")
+            lines.append("No possible durable memory items from the latest reflection.")
             return "\n".join(lines).rstrip() + "\n"
 
         current_session = None
@@ -323,7 +324,7 @@ Rules:
                         f"- session_id: {session.session_id}",
                     ]
                 )
-            lines.append(f"- candidate: {candidate.candidate}")
+            lines.append(f"- possible memory item: {candidate.candidate}")
             lines.append(f"  reason: {candidate.reason}")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -333,23 +334,34 @@ Rules:
         review_items: list[tuple[Session, MemoryCandidate]],
     ) -> str:
         if not updated:
-            return "Nightly history sync: no updated sessions."
+            return "Daily reflection report: no updated sessions since the last run."
 
         lines = [
-            f"Nightly history sync updated {len(updated)} session summaries in `memory/HISTORY.md`.",
+            "Daily reflection report",
+            "",
+            f"- Updated {len(updated)} session summaries in `memory/HISTORY.md`.",
             "No changes were made to `memory/MEMORY.md`.",
         ]
+        lines.append("")
+        lines.append("Yesterday / since-last-run takeaways:")
+        for session, summary in updated[:5]:
+            lines.append(f"- {session.key}: {summary.summary}")
+        if len(updated) > 5:
+            lines.append(f"- ... and {len(updated) - 5} more session summaries in `memory/HISTORY.md`.")
+
         if not review_items:
-            lines.append("No new memory recommendations were found.")
+            lines.append("")
+            lines.append("No durable memory suggestions came out of this reflection.")
+            lines.append("If you want to update memory, tell me naturally in chat.")
             return "\n".join(lines)
 
         lines.append("")
-        lines.append("Memory recommendations for approval:")
+        lines.append("Possible durable memory items to consider:")
         for session, candidate in review_items:
             lines.append(f"- [{session.session_id}] {candidate.candidate}")
             lines.append(f"  reason: {candidate.reason}")
         lines.append("")
-        lines.append("Reply with which items should be added to `memory/MEMORY.md`.")
+        lines.append("If you want any of these added to or removed from `memory/MEMORY.md`, tell me in natural language.")
         return "\n".join(lines)
 
     async def run(self) -> str | None:
@@ -359,7 +371,7 @@ Rules:
 
         if not sessions:
             self.memory.write_review(self._render_review([]))
-            return "Nightly history sync: no updated sessions."
+            return "Daily reflection report: no updated sessions since the last run."
 
         history_content = self.memory.read_history()
         updated: list[tuple[Session, SessionHistorySummary]] = []

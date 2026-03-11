@@ -124,6 +124,15 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         (templates_dir / "memory" / "MEMORY.md").read_text(encoding="utf-8"),
     )
     _write_text(workspace / "memory" / "HISTORY.md", "")
+    cron_dir = workspace / "cron"
+    cron_template = templates_dir / "cron" / "jobs.json"
+    if cron_template.is_file() and not cron_dir.exists():
+        _write_text(
+            cron_dir / "jobs.json",
+            cron_template.read_text(encoding="utf-8"),
+        )
+    else:
+        ensure_dir(cron_dir)
     ensure_dir(workspace / "skills")
 
     if added and not silent:

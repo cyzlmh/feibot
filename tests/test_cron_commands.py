@@ -49,7 +49,11 @@ def test_cron_add_rejects_invalid_timezone(tmp_path) -> None:
 
     assert result.exit_code == 1
     assert "Error: unknown timezone 'America/Vancovuer'" in result.stdout
-    assert not (tmp_path / "workspace" / "cron" / "jobs.json").exists()
+    jobs_path = tmp_path / "workspace" / "cron" / "jobs.json"
+    assert jobs_path.exists()
+    payload = json.loads(jobs_path.read_text(encoding="utf-8"))
+    assert len(payload["jobs"]) == 1
+    assert payload["jobs"][0]["name"] == "nightly-reflection-report"
 
 
 def test_cron_add_creates_job_file(tmp_path) -> None:
@@ -77,8 +81,8 @@ def test_cron_add_creates_job_file(tmp_path) -> None:
     jobs_path = tmp_path / "workspace" / "cron" / "jobs.json"
     assert jobs_path.exists()
     payload = json.loads(jobs_path.read_text(encoding="utf-8"))
-    assert len(payload["jobs"]) == 1
-    assert payload["jobs"][0]["name"] == "demo"
+    assert len(payload["jobs"]) == 2
+    assert any(job["name"] == "demo" for job in payload["jobs"])
 
 
 def test_cron_add_deliver_defaults_to_feishu_channel(tmp_path) -> None:
@@ -106,11 +110,12 @@ def test_cron_add_deliver_defaults_to_feishu_channel(tmp_path) -> None:
     assert result.exit_code == 0
     jobs_path = tmp_path / "workspace" / "cron" / "jobs.json"
     payload = json.loads(jobs_path.read_text(encoding="utf-8"))
-    assert payload["jobs"][0]["payload"]["channel"] == "feishu"
-    assert payload["jobs"][0]["payload"]["to"] == "oc_test_chat"
+    job = next(job for job in payload["jobs"] if job["name"] == "deliver-demo")
+    assert job["payload"]["channel"] == "feishu"
+    assert job["payload"]["to"] == "oc_test_chat"
 
 
-def test_cron_add_deliver_requires_to(tmp_path) -> None:
+def test_cron_add_deliver_can_use_runtime_default_target(tmp_path) -> None:
     config_path = _write_config(tmp_path)
 
     result = runner.invoke(
@@ -130,8 +135,13 @@ def test_cron_add_deliver_requires_to(tmp_path) -> None:
         ],
     )
 
-    assert result.exit_code == 1
-    assert "Error: --to is required when --deliver is set" in result.stdout
+    assert result.exit_code == 0
+    jobs_path = tmp_path / "workspace" / "cron" / "jobs.json"
+    payload = json.loads(jobs_path.read_text(encoding="utf-8"))
+    job = next(job for job in payload["jobs"] if job["name"] == "deliver-missing")
+    assert job["payload"]["deliver"] is True
+    assert job["payload"]["channel"] is None
+    assert job["payload"]["to"] is None
 
 
 def test_cron_add_rejects_non_feishu_channel(tmp_path) -> None:

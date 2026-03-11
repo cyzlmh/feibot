@@ -60,10 +60,12 @@ async def test_history_sync_updates_history_and_review_without_touching_memory(t
     review_text = (workspace / "memory" / "REVIEW.md").read_text(encoding="utf-8")
 
     assert result is not None
+    assert "Daily reflection report" in result
     assert session.session_id in history_text
     assert "nightly history sync" in history_text.lower()
     assert "Prefer nightly HISTORY.md sync over inline consolidation." in review_text
+    assert "possible memory item" in review_text.lower()
     assert memory_path.read_text(encoding="utf-8").startswith("# Long-term Memory")
 
     second = await service.run()
-    assert second == "Nightly history sync: no updated sessions."
+    assert second == "Daily reflection report: no updated sessions since the last run."

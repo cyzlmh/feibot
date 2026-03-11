@@ -311,13 +311,21 @@ def gateway(
                 chat_id=job.payload.to or "direct",
                 metadata={"_suppress_progress": True},
             )
-        if job.payload.deliver and job.payload.to and response and response.strip():
+        deliver_channel = job.payload.channel
+        deliver_to = job.payload.to
+        if job.payload.deliver and not deliver_to:
+            fallback_channel, fallback_chat_id = _pick_heartbeat_target()
+            if fallback_channel != "cli":
+                deliver_channel = deliver_channel or fallback_channel
+                deliver_to = fallback_chat_id
+
+        if job.payload.deliver and deliver_to and response and response.strip():
             from feibot.bus.events import OutboundMessage
 
             await bus.publish_outbound(
                 OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
+                    channel=deliver_channel or "cli",
+                    chat_id=deliver_to,
                     content=response or "",
                 )
             )
@@ -441,15 +449,6 @@ def gateway(
     )
 
     heartbeat_channel, heartbeat_chat_id = _pick_heartbeat_target()
-    cron.upsert_job(
-        name="nightly-history-sync",
-        schedule=CronSchedule(kind="cron", expr="0 4 * * *"),
-        message="history_sync",
-        payload_kind="system_event",
-        deliver=heartbeat_channel != "cli",
-        channel=heartbeat_channel if heartbeat_channel != "cli" else None,
-        to=heartbeat_chat_id if heartbeat_channel != "cli" else None,
-    )
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -686,11 +685,7 @@ def cron_add(
         console.print("[red]Error: --channel only supports 'feishu'[/red]")
         raise typer.Exit(1)
 
-    if deliver and not to:
-        console.print("[red]Error: --to is required when --deliver is set[/red]")
-        raise typer.Exit(1)
-
-    if deliver and not channel:
+    if deliver and to and not channel:
         channel = "feishu"
 
     if every:
