@@ -66,7 +66,8 @@ def action_list_fields(client: lark.Client, app_token: str = "", table_id: str =
     fields = []
     if response.data and response.data.items:
         for f in response.data.items:
-            fields.append({"field_id": f.field_id, "field_name": f.field_name, "field_type": f.field_type})
+            field_type = getattr(f, 'type', getattr(f, 'field_type', 'unknown'))
+            fields.append({"field_id": f.field_id, "field_name": f.field_name, "field_type": field_type})
     return {"fields": fields}
 
 
@@ -125,9 +126,7 @@ def action_create_record(client: lark.Client, app_token: str = "", table_id: str
     request = lark_bitable.CreateAppTableRecordRequest.builder() \
         .app_token(app_token) \
         .table_id(table_id) \
-        .request_body(lark_bitable.CreateAppTableRecordRequestBody.builder()
-            .fields(fields_dict)
-            .build()) \
+        .request_body({"fields": fields_dict}) \
         .build()
     response = client.bitable.v1.app_table_record.create(request)
     if not response.success():
@@ -152,9 +151,7 @@ def action_update_record(client: lark.Client, app_token: str = "", table_id: str
         .app_token(app_token) \
         .table_id(table_id) \
         .record_id(record_id) \
-        .request_body(lark_bitable.UpdateAppTableRecordRequestBody.builder()
-            .fields(fields_dict)
-            .build()) \
+        .request_body({"fields": fields_dict}) \
         .build()
     response = client.bitable.v1.app_table_record.update(request)
     if not response.success():
