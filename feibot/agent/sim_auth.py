@@ -570,7 +570,6 @@ class SimAuthResolver:
             "session_key": request.session_key,
             "requester_id": request.requester_id,
             "created_at": request.created_at.isoformat(),
-            "expires_at": request.expires_at.isoformat(),
         }
         if msisdn := self._resolve_cmcc_msisdn(request):
             payload["requester_phone"] = msisdn

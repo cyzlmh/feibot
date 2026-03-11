@@ -153,6 +153,7 @@ async def test_spawn_bootstrap_marks_session_as_subagent_and_hides_spawn_tool(mo
         debug_log=None,
         on_progress=None,
         disabled_tools=None,
+        on_checkpoint=None,
     ):
         seen["disabled_tools"] = disabled_tools
         return "done", [], {"history_messages": [], "stopped_reason": "stop"}

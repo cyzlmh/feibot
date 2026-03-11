@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from feibot.agent.exec_approval import ExecApprovalManager
 
@@ -12,7 +12,7 @@ def test_normalize_decision_aliases() -> None:
 
 
 def test_requester_only_approval_and_allow_once() -> None:
-    manager = ExecApprovalManager(enabled=True, timeout_sec=120)
+    manager = ExecApprovalManager(enabled=True)
     request = manager.create_request(
         command="rm -f cache.txt",
         working_dir="/workspace",
@@ -47,7 +47,6 @@ def test_requester_only_approval_and_allow_once() -> None:
 def test_configured_approver_can_resolve_others_request() -> None:
     manager = ExecApprovalManager(
         enabled=True,
-        timeout_sec=120,
         approvers=["ou_admin"],
     )
     request = manager.create_request(
@@ -68,8 +67,8 @@ def test_configured_approver_can_resolve_others_request() -> None:
     assert manager.get_request(request.id) is None
 
 
-def test_expired_request_is_pruned() -> None:
-    manager = ExecApprovalManager(enabled=True, timeout_sec=120)
+def test_missing_request_returns_not_found() -> None:
+    manager = ExecApprovalManager(enabled=True)
     request = manager.create_request(
         command="rm -f old.txt",
         working_dir="/workspace",
@@ -78,13 +77,12 @@ def test_expired_request_is_pruned() -> None:
         session_key="feishu:oc_1",
         requester_id="ou_requester",
     )
-    request.expires_at = datetime.now() - timedelta(seconds=1)
+    assert request.created_at <= datetime.now()
 
-    assert manager.get_request(request.id) is None
     resolved, err = manager.resolve(
-        approval_id=request.id,
+        approval_id="missing",
         decision="allow-once",
         resolved_by="ou_requester",
     )
     assert resolved is None
-    assert "expired" in err
+    assert "not found" in err

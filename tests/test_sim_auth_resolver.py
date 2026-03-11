@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
@@ -23,7 +23,6 @@ def _make_request(requester_id: str = "ou_test") -> ExecApprovalRequest:
         session_key="feishu:oc_test",
         requester_id=requester_id,
         created_at=datetime.now(),
-        expires_at=datetime.now() + timedelta(minutes=2),
     )
 
 

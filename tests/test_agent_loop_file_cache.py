@@ -44,6 +44,7 @@ async def test_file_message_is_cached_until_followup_text(monkeypatch, tmp_path)
         debug_log=None,
         on_progress=None,
         disabled_tools=None,
+        on_checkpoint=None,
     ):
         captured["user_goal"] = user_goal
         return "done", [], {"stopped_reason": "stop", "history_messages": []}

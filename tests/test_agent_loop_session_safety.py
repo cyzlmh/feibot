@@ -76,6 +76,7 @@ async def test_llm_error_response_not_persisted_to_session(monkeypatch, tmp_path
         debug_log=None,
         on_progress=None,
         disabled_tools=None,
+        on_checkpoint=None,
     ):
         return "provider error", [], {
             "stopped_reason": "llm_error",

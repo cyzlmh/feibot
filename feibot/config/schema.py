@@ -116,7 +116,6 @@ class ExecToolConfig(BaseModel):
     approval_enabled: bool = True
     approval_confirm_mode: str = ""  # Empty/none means confirm-risk actions run without HITL.
     approval_dangerous_mode: str = ""  # Effective dangerous mode is max(confirm, dangerous).
-    approval_timeout_sec: int = 120
     approval_approvers: list[str] = Field(default_factory=list)  # Empty means requester only
     approval_sim_auth_url: str = ""  # Optional sync SIM-auth verifier endpoint for exec approvals
     approval_sim_auth_api_key: str = ""  # Optional Bearer token for SIM-auth endpoint

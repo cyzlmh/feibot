@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -74,23 +73,6 @@ _SAVE_MEMORY_TOOL = [
     }
 ]
 
-
-@dataclass
-class PendingExecContinuation:
-    """In-memory resume context captured when exec approval pauses a loop."""
-
-    approval_id: str
-    session_key: str
-    channel: str
-    chat_id: str
-    sender_id: str
-    user_goal: str
-    initial_messages: list[dict[str, Any]]
-    base_history_messages: list[dict[str, Any]]
-    disabled_tools: set[str] | None
-    metadata: dict[str, Any]
-
-
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -106,7 +88,9 @@ class AgentLoop:
     SESSION_TOOL_RESULT_MAX_CHARS = 2000
     MEMORY_TOOL_RESULT_MAX_CHARS = 300
     PENDING_FILES_METADATA_KEY = "pending_files"
+    RESUME_STATE_METADATA_KEY = "resume_state"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
+    REFLECT_PROMPT = "Reflect on the results and decide next steps."
     _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card", "sim_auth"}
     _APPROVAL_MODE_STRENGTH = {"none": 0, "feishu_card": 1, "sim_auth": 2}
     COMMANDS_HELP_TEXT = (
@@ -170,7 +154,6 @@ class AgentLoop:
         self.agent_name = agent_name
         self.exec_approvals = ExecApprovalManager(
             enabled=bool(getattr(self.exec_config, "approval_enabled", True)),
-            timeout_sec=int(getattr(self.exec_config, "approval_timeout_sec", 120) or 120),
             approvers=list(getattr(self.exec_config, "approval_approvers", []) or []),
         )
         allow_from_entries = (
@@ -244,7 +227,6 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._approval_execution_tasks: set[asyncio.Task[None]] = set()
-        self._approval_continuations: dict[str, PendingExecContinuation] = {}
         self._sim_auth_tasks: set[asyncio.Task[None]] = set()
         self._sim_auth_pending_ids: set[str] = set()
         self._sim_auth_warned_missing_config = False
@@ -629,35 +611,6 @@ class AgentLoop:
             return False
         return self.sim_auth_resolver.can_verify_request(request)
 
-    def _capture_exec_approval_continuation(
-        self,
-        *,
-        approval_id: str,
-        msg: InboundMessage,
-        user_goal: str,
-        loop_meta: dict[str, Any],
-        disabled_tools: set[str] | None,
-    ) -> None:
-        """Store resumable context so an approved exec can continue the blocked loop."""
-        resume_messages = loop_meta.get("resume_messages")
-        base_history_messages = loop_meta.get("resume_base_history_messages")
-        if not isinstance(resume_messages, list) or not isinstance(base_history_messages, list):
-            return
-
-        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
-        self._approval_continuations[approval_id] = PendingExecContinuation(
-            approval_id=approval_id,
-            session_key=msg.session_key,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            user_goal=user_goal,
-            initial_messages=copy.deepcopy(resume_messages),
-            base_history_messages=copy.deepcopy(base_history_messages),
-            disabled_tools=set(disabled_tools) if disabled_tools else None,
-            metadata=dict(metadata),
-        )
-
     @staticmethod
     def _replace_exec_approval_pending_result(
         history_messages: list[dict[str, Any]],
@@ -683,6 +636,194 @@ class AgentLoop:
             self._approval_execution_tasks.discard(t)
 
         task.add_done_callback(_cleanup)
+
+    @staticmethod
+    def _serialize_approval_request(request: ExecApprovalRequest) -> dict[str, Any]:
+        return {
+            "id": request.id,
+            "command": request.command,
+            "working_dir": request.working_dir,
+            "channel": request.channel,
+            "chat_id": request.chat_id,
+            "session_key": request.session_key,
+            "requester_id": request.requester_id,
+            "risk_level": request.risk_level,
+            "created_at": request.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def _deserialize_approval_request(payload: Any) -> ExecApprovalRequest | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            created_at = datetime.fromisoformat(str(payload.get("created_at") or ""))
+        except Exception:
+            return None
+        try:
+            return ExecApprovalRequest(
+                id=str(payload.get("id") or "").strip(),
+                command=str(payload.get("command") or ""),
+                working_dir=str(payload.get("working_dir") or ""),
+                channel=str(payload.get("channel") or ""),
+                chat_id=str(payload.get("chat_id") or ""),
+                session_key=str(payload.get("session_key") or ""),
+                requester_id=str(payload.get("requester_id") or ""),
+                risk_level=str(payload.get("risk_level") or "confirm") or "confirm",
+                created_at=created_at,
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _serialize_disabled_tools(disabled_tools: set[str] | None) -> list[str]:
+        if not disabled_tools:
+            return []
+        return sorted(str(x).strip() for x in disabled_tools if str(x).strip())
+
+    @staticmethod
+    def _deserialize_disabled_tools(payload: Any) -> set[str] | None:
+        if not isinstance(payload, list):
+            return None
+        restored = {str(x).strip() for x in payload if str(x).strip()}
+        return restored or None
+
+    def _build_resume_state(
+        self,
+        *,
+        status: str,
+        reason: str,
+        user_goal: str,
+        messages: list[dict[str, Any]],
+        disabled_tools: set[str] | None,
+        channel: str,
+        chat_id: str,
+        sender_id: str,
+        metadata: dict[str, Any] | None,
+        approval_request: ExecApprovalRequest | None = None,
+        history_messages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "version": 1,
+            "status": status,
+            "reason": reason,
+            "user_goal": user_goal,
+            "messages": copy.deepcopy(messages),
+            "disabled_tools": self._serialize_disabled_tools(disabled_tools),
+            "channel": channel,
+            "chat_id": chat_id,
+            "sender_id": sender_id,
+            "metadata": dict(metadata or {}),
+            "updated_at": datetime.now().isoformat(),
+        }
+        if approval_request is not None:
+            state["approval_request"] = self._serialize_approval_request(approval_request)
+        if history_messages is not None:
+            state["history_messages"] = copy.deepcopy(history_messages)
+        return state
+
+    @staticmethod
+    def _get_resume_state(session: Session) -> dict[str, Any] | None:
+        state = session.metadata.get(AgentLoop.RESUME_STATE_METADATA_KEY)
+        return state if isinstance(state, dict) else None
+
+    def _set_resume_state(self, session: Session, state: dict[str, Any] | None) -> None:
+        if state:
+            session.metadata[self.RESUME_STATE_METADATA_KEY] = state
+        else:
+            session.metadata.pop(self.RESUME_STATE_METADATA_KEY, None)
+
+    @classmethod
+    def _resume_state_matches_approval(cls, state: dict[str, Any] | None, approval_id: str) -> bool:
+        if not isinstance(state, dict):
+            return False
+        request = state.get("approval_request")
+        if not isinstance(request, dict):
+            return False
+        return str(request.get("id") or "").strip() == str(approval_id or "").strip()
+
+    def _resume_request_from_state(self, state: dict[str, Any] | None) -> ExecApprovalRequest | None:
+        if not isinstance(state, dict):
+            return None
+        return self._deserialize_approval_request(state.get("approval_request"))
+
+    def _build_resume_messages_after_pause(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        remaining_tool_calls: list[Any],
+        reason: str,
+        append_reflect_prompt: bool = True,
+    ) -> list[dict[str, Any]]:
+        resume_messages = copy.deepcopy(messages)
+        for tool_call in remaining_tool_calls:
+            tool_id = str(getattr(tool_call, "id", "") or "")
+            tool_name = str(getattr(tool_call, "name", "") or "")
+            if not tool_id or not tool_name:
+                continue
+            resume_messages = self.context.add_tool_result(
+                resume_messages,
+                tool_id,
+                tool_name,
+                f"Error: {reason}",
+            )
+        if append_reflect_prompt:
+            resume_messages = self._append_reflect_prompt(resume_messages)
+        return resume_messages
+
+    @classmethod
+    def _append_reflect_prompt(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if messages:
+            last = messages[-1]
+            if last.get("role") == "user" and last.get("content") == cls.REFLECT_PROMPT:
+                return messages
+        messages.append({"role": "user", "content": cls.REFLECT_PROMPT})
+        return messages
+
+    @staticmethod
+    def _resume_messages_from_state(state: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+        if not isinstance(state, dict):
+            return None
+        messages = state.get("messages")
+        if not isinstance(messages, list):
+            return None
+        return copy.deepcopy(messages)
+
+    @staticmethod
+    def _resume_history_messages_from_state(state: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+        if not isinstance(state, dict):
+            return None
+        history_messages = state.get("history_messages")
+        if not isinstance(history_messages, list):
+            return None
+        return copy.deepcopy(history_messages)
+
+    def _advance_resume_state_after_approval(
+        self,
+        state: dict[str, Any] | None,
+        *,
+        approval_id: str,
+        replacement: str,
+        status: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(state, dict):
+            return None
+        messages = self._resume_messages_from_state(state)
+        if messages is None:
+            return None
+        if not self._replace_exec_approval_pending_result(messages, approval_id, replacement):
+            return None
+        next_state = copy.deepcopy(state)
+        next_state["messages"] = messages
+        history_messages = self._resume_history_messages_from_state(state)
+        if history_messages is not None:
+            self._replace_exec_approval_pending_result(history_messages, approval_id, replacement)
+            next_state["history_messages"] = history_messages
+        next_state["status"] = status
+        next_state["reason"] = reason
+        next_state["updated_at"] = datetime.now().isoformat()
+        next_state.pop("approval_request", None)
+        return next_state
 
     async def _request_sim_auth_decision(
         self,
@@ -712,22 +853,38 @@ class AgentLoop:
         lock = self._get_session_lock(request.session_key)
         try:
             async with lock:
-                continuation = self._approval_continuations.pop(request.id, None)
-                session_key = request.session_key
-                session = self.sessions.get_or_create(session_key)
-                if continuation is not None:
-                    denied_result = f"Error: exec approval denied (ID: {request.id})."
-                    self._replace_exec_approval_pending_result(
-                        continuation.initial_messages, request.id, denied_result
-                    )
-                    self._replace_exec_approval_pending_result(
-                        continuation.base_history_messages, request.id, denied_result
-                    )
-                    session = self.sessions.get_or_create(continuation.session_key)
-                    session_key = continuation.session_key
-                    self._append_session_history(session, continuation.base_history_messages)
-                    # Set pending_task so user can continue after denial
-                    session.metadata["pending_task"] = continuation.user_goal
+                session = self.sessions.get_or_create(request.session_key)
+                denied_result = f"Error: exec approval denied (ID: {request.id})."
+                resume_state = self._get_resume_state(session)
+                next_state = self._advance_resume_state_after_approval(
+                    resume_state,
+                    approval_id=request.id,
+                    replacement=denied_result,
+                    status="paused",
+                    reason="exec_approval_denied",
+                )
+                paused_state = None
+                if next_state is not None:
+                    history_messages = self._resume_history_messages_from_state(next_state)
+                    if history_messages:
+                        self._append_session_history(session, history_messages)
+                    messages = self._resume_messages_from_state(next_state)
+                    metadata = next_state.get("metadata")
+                    if messages is not None:
+                        paused_state = self._build_resume_state(
+                            status="paused",
+                            reason="exec_approval_denied",
+                            user_goal=str(next_state.get("user_goal") or ""),
+                            messages=messages,
+                            disabled_tools=self._deserialize_disabled_tools(
+                                next_state.get("disabled_tools")
+                            ),
+                            channel=str(next_state.get("channel") or request.channel),
+                            chat_id=str(next_state.get("chat_id") or request.chat_id),
+                            sender_id=str(next_state.get("sender_id") or request.requester_id),
+                            metadata=metadata if isinstance(metadata, dict) else {},
+                        )
+                self._set_resume_state(session, paused_state)
 
                 session.add_message("assistant", denial_content, tools_used=["exec"])
                 self.channel_logs.append(
@@ -743,6 +900,37 @@ class AgentLoop:
                 self.sessions.save(session)
         finally:
             self._prune_session_lock(request.session_key, lock)
+
+    def _restore_resume_context(
+        self,
+        state: dict[str, Any],
+        *,
+        fallback_channel: str,
+        fallback_chat_id: str,
+        fallback_sender_id: str,
+        fallback_metadata: dict[str, Any] | None = None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        str,
+        set[str] | None,
+        str,
+        str,
+        str,
+        dict[str, Any],
+    ] | None:
+        messages = self._resume_messages_from_state(state)
+        if messages is None:
+            return None
+        metadata = state.get("metadata")
+        return (
+            messages,
+            str(state.get("user_goal") or ""),
+            self._deserialize_disabled_tools(state.get("disabled_tools")),
+            str(state.get("channel") or fallback_channel),
+            str(state.get("chat_id") or fallback_chat_id),
+            str(state.get("sender_id") or fallback_sender_id),
+            dict(metadata) if isinstance(metadata, dict) else dict(fallback_metadata or {}),
+        )
 
     def _schedule_sim_auth_after_pending(self, request: ExecApprovalRequest) -> None:
         if not self._is_sim_auth_approval_enabled(request):
@@ -816,6 +1004,22 @@ class AgentLoop:
         lock = self._get_session_lock(request.session_key)
         try:
             async with lock:
+                session = self.sessions.get_or_create(request.session_key)
+                resume_state = self._get_resume_state(session)
+                if not self._resume_state_matches_approval(resume_state, request.id):
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=request.channel,
+                            chat_id=request.chat_id,
+                            content=(
+                                f"Error: resume state missing for exec approval {request.id}. "
+                                "The command was not executed."
+                            ),
+                            metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
+                        )
+                    )
+                    return
+
                 self._set_tool_context(
                     request.channel,
                     request.chat_id,
@@ -850,8 +1054,14 @@ class AgentLoop:
                     result_text[:160].replace("\n", " "),
                 )
 
-                continuation = self._approval_continuations.pop(request.id, None)
-                if continuation is None:
+                next_state = self._advance_resume_state_after_approval(
+                    resume_state,
+                    approval_id=request.id,
+                    replacement=result_text,
+                    status="approved_ready",
+                    reason="exec_approval_approved",
+                )
+                if next_state is None:
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             channel=request.channel,
@@ -867,39 +1077,79 @@ class AgentLoop:
                     )
                     return
 
-                self._replace_exec_approval_pending_result(
-                    continuation.initial_messages, request.id, result_text
-                )
-                self._replace_exec_approval_pending_result(
-                    continuation.base_history_messages, request.id, result_text
-                )
+                pre_resume_history = self._resume_history_messages_from_state(next_state)
+                if pre_resume_history:
+                    self._append_session_history(session, pre_resume_history)
 
-                session = self.sessions.get_or_create(continuation.session_key)
-                self._append_session_history(session, continuation.base_history_messages)
+                restored = self._restore_resume_context(
+                    next_state,
+                    fallback_channel=request.channel,
+                    fallback_chat_id=request.chat_id,
+                    fallback_sender_id=request.requester_id,
+                    fallback_metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
+                )
+                if restored is None:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=request.channel,
+                            chat_id=request.chat_id,
+                            content=(
+                                f"Error: restored exec approval state is incomplete for {request.id}. "
+                                "The command ran, but the agent could not resume."
+                            ),
+                            metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
+                        )
+                    )
+                    return
+                (
+                    resume_messages,
+                    resume_user_goal,
+                    resume_disabled_tools,
+                    resume_channel,
+                    resume_chat_id,
+                    resume_sender_id,
+                    resume_metadata,
+                ) = restored
 
                 message_tool = self.tools.get("message")
                 if isinstance(message_tool, MessageTool):
                     message_tool.start_turn()
 
                 async def _resume_progress(content: str, *, tool_hint: bool = False) -> None:
-                    if bool(continuation.metadata.get("_suppress_progress")):
+                    if bool(resume_metadata.get("_suppress_progress")):
                         return
-                    meta = dict(continuation.metadata)
+                    meta = dict(resume_metadata)
                     meta["_progress"] = True
                     meta["_tool_hint"] = tool_hint
                     meta["_exec_approval_id"] = request.id
                     await self.bus.publish_outbound(OutboundMessage(
-                        channel=continuation.channel,
-                        chat_id=continuation.chat_id,
+                        channel=resume_channel,
+                        chat_id=resume_chat_id,
                         content=content,
                         metadata=meta,
                     ))
 
+                async def _save_resume_checkpoint(checkpoint_messages: list[dict[str, Any]]) -> None:
+                    state = self._build_resume_state(
+                        status="running",
+                        reason="checkpoint",
+                        user_goal=resume_user_goal,
+                        messages=checkpoint_messages,
+                        disabled_tools=resume_disabled_tools,
+                        channel=resume_channel,
+                        chat_id=resume_chat_id,
+                        sender_id=resume_sender_id,
+                        metadata=resume_metadata,
+                    )
+                    self._set_resume_state(session, state)
+                    self.sessions.save(session)
+
                 final_content, tools_used, loop_meta = await self._run_agent_loop(
-                    continuation.initial_messages,
-                    user_goal=continuation.user_goal,
+                    resume_messages,
+                    user_goal=resume_user_goal,
                     on_progress=_resume_progress,
-                    disabled_tools=continuation.disabled_tools,
+                    disabled_tools=resume_disabled_tools,
+                    on_checkpoint=_save_resume_checkpoint,
                 )
 
                 stop_reason = str(loop_meta.get("stopped_reason") or "")
@@ -907,34 +1157,47 @@ class AgentLoop:
                     next_pending_id = str(loop_meta.get("pending_approval_id") or "").strip()
                     if next_pending_id:
                         followup_request = self.exec_approvals.get_request(next_pending_id)
-                        resume_messages = loop_meta.get("resume_messages")
-                        resume_base_history = loop_meta.get("resume_base_history_messages")
-                        if (
-                            followup_request
-                            and isinstance(resume_messages, list)
-                            and isinstance(resume_base_history, list)
-                        ):
-                            self._approval_continuations[next_pending_id] = PendingExecContinuation(
-                                approval_id=next_pending_id,
-                                session_key=continuation.session_key,
-                                channel=continuation.channel,
-                                chat_id=continuation.chat_id,
-                                sender_id=continuation.sender_id,
-                                user_goal=continuation.user_goal,
-                                initial_messages=copy.deepcopy(resume_messages),
-                                base_history_messages=copy.deepcopy(resume_base_history),
-                                disabled_tools=set(continuation.disabled_tools) if continuation.disabled_tools else None,
-                                metadata=dict(continuation.metadata),
+                        paused_messages = loop_meta.get("resume_messages")
+                        paused_history = loop_meta.get("resume_base_history_messages")
+                        if followup_request and isinstance(paused_messages, list):
+                            state = self._build_resume_state(
+                                status="awaiting_approval",
+                                reason="exec_approval_pending",
+                                user_goal=resume_user_goal,
+                                messages=paused_messages,
+                                disabled_tools=resume_disabled_tools,
+                                channel=resume_channel,
+                                chat_id=resume_chat_id,
+                                sender_id=resume_sender_id,
+                                metadata=resume_metadata,
+                                approval_request=followup_request,
+                                history_messages=(
+                                    paused_history if isinstance(paused_history, list) else None
+                                ),
                             )
+                            self._set_resume_state(session, state)
                             await self._publish_exec_approval_prompt(followup_request)
                             self._schedule_sim_auth_after_pending(followup_request)
                     self.sessions.save(session)
                     return
 
-                if stop_reason in {"max_iterations", "loop_guard", "error_threshold"}:
-                    session.metadata["pending_task"] = loop_meta.get("pending_task", continuation.user_goal)
+                if stop_reason in {"max_iterations", "loop_guard", "error_threshold", "llm_error", "empty_response"}:
+                    paused_messages = loop_meta.get("resume_messages")
+                    if isinstance(paused_messages, list):
+                        state = self._build_resume_state(
+                            status="paused",
+                            reason=stop_reason,
+                            user_goal=resume_user_goal,
+                            messages=paused_messages,
+                            disabled_tools=resume_disabled_tools,
+                            channel=resume_channel,
+                            chat_id=resume_chat_id,
+                            sender_id=resume_sender_id,
+                            metadata=resume_metadata,
+                        )
+                        self._set_resume_state(session, state)
                 else:
-                    session.metadata.pop("pending_task", None)
+                    self._set_resume_state(session, None)
 
                 if final_content is None:
                     final_content = "I've completed processing but have no response to give."
@@ -954,8 +1217,8 @@ class AgentLoop:
                         role="assistant",
                         content=final_content,
                         timestamp=datetime.now().isoformat(),
-                        channel=continuation.channel,
-                        chat_id=continuation.chat_id,
+                        channel=resume_channel,
+                        chat_id=resume_chat_id,
                     ),
                 )
                 self.sessions.save(session)
@@ -964,10 +1227,10 @@ class AgentLoop:
                     return
                 await self.bus.publish_outbound(
                     OutboundMessage(
-                        channel=continuation.channel,
-                        chat_id=continuation.chat_id,
+                        channel=resume_channel,
+                        chat_id=resume_chat_id,
                         content=final_content,
-                        metadata=continuation.metadata,
+                        metadata=resume_metadata,
                     )
                 )
         finally:
@@ -1156,7 +1419,7 @@ class AgentLoop:
             f"已执行工具: {done}\n"
             "最近观察:\n"
             f"{obs}\n\n"
-            "如果你希望继续，请发送 `/go`。我会基于当前进展继续推进。"
+            "如果你希望继续，请发送 `/go`。我会从保存的暂停状态继续。"
         )
 
     def _is_tool_error_result(self, result: str | None) -> bool:
@@ -1269,6 +1532,7 @@ class AgentLoop:
         debug_log: list[dict[str, Any]] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         disabled_tools: set[str] | None = None,
+        on_checkpoint: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], dict[str, Any]]:
         """
         Run the agent iteration loop.
@@ -1304,6 +1568,9 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            if on_checkpoint:
+                await on_checkpoint(copy.deepcopy(messages))
 
             tool_defs = self._filter_tool_definitions(
                 self.tools.get_definitions(),
@@ -1357,7 +1624,7 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
-                for tool_call in response.tool_calls:
+                for tool_index, tool_call in enumerate(response.tool_calls):
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     signature = f"{tool_call.name}:{json.dumps(tool_call.arguments, sort_keys=True, ensure_ascii=False)}"
@@ -1395,7 +1662,15 @@ class AgentLoop:
                             "content": final_content,
                             "tools_used": tools_used if tools_used else None,
                         })
-                        loop_meta = _build_loop_meta("loop_guard", pending_task=user_goal)
+                        resume_messages = self._build_resume_messages_after_pause(
+                            messages=messages,
+                            remaining_tool_calls=response.tool_calls[tool_index:],
+                            reason="tool execution paused by loop guard before running the blocked call",
+                        )
+                        loop_meta = _build_loop_meta(
+                            "loop_guard",
+                            resume_messages=resume_messages,
+                        )
                         return final_content, tools_used, loop_meta
 
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -1435,6 +1710,11 @@ class AgentLoop:
                     if pending_approval_id:
                         request = self.exec_approvals.get_request(pending_approval_id)
                         base_history_messages = copy.deepcopy(history_messages)
+                        resume_messages = self._build_resume_messages_after_pause(
+                            messages=messages,
+                            remaining_tool_calls=response.tool_calls[tool_index + 1:],
+                            reason="tool execution deferred because exec approval paused the loop",
+                        )
                         card_only_mode = bool(
                             request and self._is_feishu_card_approval_enabled(request)
                         )
@@ -1461,7 +1741,7 @@ class AgentLoop:
                         loop_meta = _build_loop_meta(
                             "exec_approval_pending",
                             pending_approval_id=pending_approval_id,
-                            resume_messages=copy.deepcopy(messages),
+                            resume_messages=resume_messages,
                             resume_base_history_messages=base_history_messages,
                         )
                         return final_content, tools_used, loop_meta
@@ -1488,7 +1768,15 @@ class AgentLoop:
                             "content": final_content,
                             "tools_used": tools_used if tools_used else None,
                         })
-                        loop_meta = _build_loop_meta("error_threshold", pending_task=user_goal)
+                        resume_messages = self._build_resume_messages_after_pause(
+                            messages=messages,
+                            remaining_tool_calls=response.tool_calls[tool_index + 1:],
+                            reason="tool execution skipped because the loop paused after consecutive tool errors",
+                        )
+                        loop_meta = _build_loop_meta(
+                            "error_threshold",
+                            resume_messages=resume_messages,
+                        )
                         return final_content, tools_used, loop_meta
 
                     if tool_call.name == "message":
@@ -1498,19 +1786,19 @@ class AgentLoop:
                             final_content = str(content_arg).strip() if content_arg is not None else ""
                             loop_meta = _build_loop_meta("message_finish")
                             return final_content or "Message sent.", tools_used, loop_meta
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
+                messages = self._append_reflect_prompt(messages)
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
                     logger.error("LLM returned error: {}", (clean or response.content or "")[:200])
                     final_content = clean or response.content or "Sorry, I encountered an error calling the AI model."
-                    loop_meta = _build_loop_meta("llm_error")
+                    loop_meta = _build_loop_meta("llm_error", resume_messages=copy.deepcopy(messages))
                     break
 
                 final_candidate = clean or response.content
                 if not final_candidate:
                     final_content = "I've completed processing but have no response to give."
-                    loop_meta = _build_loop_meta("empty_response")
+                    loop_meta = _build_loop_meta("empty_response", resume_messages=copy.deepcopy(messages))
                     break
 
                 final_content = final_candidate
@@ -1539,7 +1827,10 @@ class AgentLoop:
                 "content": final_content,
                 "tools_used": tools_used if tools_used else None,
             })
-            loop_meta = _build_loop_meta("max_iterations", pending_task=user_goal)
+            loop_meta = _build_loop_meta(
+                "max_iterations",
+                resume_messages=copy.deepcopy(messages),
+            )
 
         if "history_messages" not in loop_meta:
             loop_meta["history_messages"] = history_messages
@@ -1550,96 +1841,24 @@ class AgentLoop:
         self._running = True
         logger.info("Agent loop started")
 
-        # Start periodic cleanup of expired approvals
-        cleanup_task = asyncio.create_task(self._periodic_expired_approval_cleanup())
-
-        try:
-            while self._running:
-                try:
-                    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-
-                if self._normalize_command(msg.content) == "/stop":
-                    await self._handle_stop(msg)
-                else:
-                    task = asyncio.create_task(self._dispatch(msg))
-                    self._active_tasks.setdefault(msg.session_key, []).append(task)
-                    task.add_done_callback(
-                        lambda t, k=msg.session_key: (
-                            self._active_tasks.get(k, []).remove(t)
-                            if t in self._active_tasks.get(k, [])
-                            else None
-                        )
-                    )
-        finally:
-            cleanup_task.cancel()
-            try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-    async def _periodic_expired_approval_cleanup(self) -> None:
-        """Periodically clean up expired approvals and set pending_task for continuation."""
         while self._running:
             try:
-                await asyncio.sleep(30)  # Check every 30 seconds
-                if not self._running:
-                    break
+                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
 
-                expired = self.exec_approvals._prune_expired()
-                for request in expired:
-                    logger.info("Approval {} expired, cleaning up", request.id)
-                    await self._handle_expired_approval(request)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Error in expired approval cleanup: {}", e)
-
-    async def _handle_expired_approval(self, request: ExecApprovalRequest) -> None:
-        """Handle an expired approval: set pending_task for continuation."""
-        lock = self._get_session_lock(request.session_key)
-        try:
-            async with lock:
-                continuation = self._approval_continuations.pop(request.id, None)
-                if continuation is not None:
-                    session = self.sessions.get_or_create(continuation.session_key)
-                    # Mark the exec as failed in history
-                    denied_result = f"Error: exec approval expired (ID: {request.id})."
-                    self._replace_exec_approval_pending_result(
-                        continuation.initial_messages, request.id, denied_result
+            if self._normalize_command(msg.content) == "/stop":
+                await self._handle_stop(msg)
+            else:
+                task = asyncio.create_task(self._dispatch(msg))
+                self._active_tasks.setdefault(msg.session_key, []).append(task)
+                task.add_done_callback(
+                    lambda t, k=msg.session_key: (
+                        self._active_tasks.get(k, []).remove(t)
+                        if t in self._active_tasks.get(k, [])
+                        else None
                     )
-                    self._replace_exec_approval_pending_result(
-                        continuation.base_history_messages, request.id, denied_result
-                    )
-                    self._append_session_history(session, continuation.base_history_messages)
-                    # Set pending_task so user can continue
-                    session.metadata["pending_task"] = continuation.user_goal
-                    # Add denial message to session
-                    denial_content = f"⏱ Exec approval expired (ID: {request.id})."
-                    session.add_message("assistant", denial_content, tools_used=["exec"])
-                    self.channel_logs.append(
-                        session,
-                        LogEntry(
-                            role="assistant",
-                            content=denial_content,
-                            timestamp=datetime.now().isoformat(),
-                            channel=request.channel,
-                            chat_id=request.chat_id,
-                        ),
-                    )
-                    self.sessions.save(session)
-                    # Notify user
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=request.channel,
-                            chat_id=request.chat_id,
-                            content=denial_content,
-                            metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
-                        )
-                    )
-        finally:
-            self._prune_session_lock(request.session_key, lock)
+                )
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
@@ -1710,7 +1929,6 @@ class AgentLoop:
             self.sim_auth_resolver.close()
         except Exception:
             logger.exception("Failed to close SimAuth resolver.")
-        self._approval_continuations.clear()
         logger.info("Agent loop stopping")
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
@@ -1857,6 +2075,7 @@ class AgentLoop:
 
         # Handle slash commands
         cmd, cmd_args = self._parse_command(msg.content)
+        resume_state = self._get_resume_state(session)
         if cmd == "/stop":
             sub_cancelled = await self.subagents.cancel_by_session(key)
             content = f"⏹ Stopped {sub_cancelled} task(s)." if sub_cancelled else "No active task to stop."
@@ -1886,6 +2105,21 @@ class AgentLoop:
                 decision=decision,
                 resolved_by=msg.sender_id,
             )
+            if resolution is None:
+                resume_request = None
+                if self._resume_state_matches_approval(resume_state, approval_id):
+                    resume_request = self._resume_request_from_state(resume_state)
+                if resume_request is not None:
+                    if not self.exec_approvals._is_authorized_approver(resume_request, msg.sender_id):
+                        error = "You are not authorized to resolve this approval request."
+                    else:
+                        resolution = ExecApprovalResolution(
+                            request=resume_request,
+                            decision=decision,
+                            resolved_by=msg.sender_id,
+                            resolved_at=datetime.now(),
+                        )
+                        error = ""
             if resolution is None:
                 return OutboundMessage(
                     channel=msg.channel,
@@ -1951,12 +2185,48 @@ class AgentLoop:
             )
 
         effective_content = msg.content
+        restored_initial_messages: list[dict[str, Any]] | None = None
         if cmd in {"/go", "继续", "continue"}:
-            pending_task = session.metadata.get("pending_task")
-            if isinstance(pending_task, str) and pending_task.strip():
-                effective_content = f"Continue unfinished task with current context: {pending_task}"
-            else:
-                effective_content = "Continue the previous unfinished task with current context."
+            if not resume_state:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="No paused task to resume.",
+                )
+            state_status = str(resume_state.get("status") or "").strip()
+            if state_status == "awaiting_approval":
+                approval_request = self._resume_request_from_state(resume_state)
+                approval_id = approval_request.id if approval_request else "unknown"
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Exec approval still required (ID: {approval_id}). Approve or deny it before resuming.",
+                    metadata=msg.metadata or {},
+                )
+            restored = self._restore_resume_context(
+                resume_state,
+                fallback_channel=msg.channel,
+                fallback_chat_id=msg.chat_id,
+                fallback_sender_id=msg.sender_id,
+                fallback_metadata=msg.metadata if isinstance(msg.metadata, dict) else {},
+            )
+            if restored is None:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Saved resume state is incomplete and cannot be resumed.",
+                )
+            (
+                restored_initial_messages,
+                effective_content,
+                restored_disabled_tools,
+                _resume_channel,
+                _resume_chat_id,
+                _resume_sender_id,
+                _resume_metadata,
+            ) = restored
+            if restored_disabled_tools is not None:
+                disabled_tools = restored_disabled_tools
 
         # Record raw inbound message for audit/replay and backfill older unsynced messages.
         self.channel_logs.append(
@@ -2031,13 +2301,16 @@ class AgentLoop:
         }:
             pending_files = self._pop_pending_files(session)
             effective_content = self._append_file_refs_to_goal(effective_content, pending_files)
-        initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
-            current_message=effective_content,
-            media=msg.media if msg.media else None,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-        )
+        if restored_initial_messages is not None:
+            initial_messages = restored_initial_messages
+        else:
+            initial_messages = self.context.build_messages(
+                history=session.get_history(max_messages=self.memory_window),
+                current_message=effective_content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             if bool((msg.metadata or {}).get("_suppress_progress")):
@@ -2052,12 +2325,28 @@ class AgentLoop:
                 metadata=meta,
             ))
 
+        async def _save_resume_checkpoint(checkpoint_messages: list[dict[str, Any]]) -> None:
+            state = self._build_resume_state(
+                status="running",
+                reason="checkpoint",
+                user_goal=effective_content,
+                messages=checkpoint_messages,
+                disabled_tools=disabled_tools,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                metadata=msg.metadata if isinstance(msg.metadata, dict) else {},
+            )
+            self._set_resume_state(session, state)
+            self.sessions.save(session)
+
         final_content, tools_used, loop_meta = await self._run_agent_loop(
             initial_messages,
             user_goal=effective_content,
             debug_log=debug_log,
             on_progress=_bus_progress,
             disabled_tools=disabled_tools,
+            on_checkpoint=_save_resume_checkpoint,
         )
 
         stop_reason = loop_meta.get("stopped_reason")
@@ -2065,22 +2354,47 @@ class AgentLoop:
         if stop_reason == "exec_approval_pending":
             pending_id = str(loop_meta.get("pending_approval_id") or "").strip()
             if pending_id:
-                self._capture_exec_approval_continuation(
-                    approval_id=pending_id,
-                    msg=msg,
-                    user_goal=effective_content,
-                    loop_meta=loop_meta,
-                    disabled_tools=disabled_tools,
-                )
                 request = self.exec_approvals.get_request(pending_id)
+                resume_messages = loop_meta.get("resume_messages")
+                resume_history = loop_meta.get("resume_base_history_messages")
                 if request:
+                    if isinstance(resume_messages, list):
+                        state = self._build_resume_state(
+                            status="awaiting_approval",
+                            reason="exec_approval_pending",
+                            user_goal=effective_content,
+                            messages=resume_messages,
+                            disabled_tools=disabled_tools,
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            sender_id=msg.sender_id,
+                            metadata=msg.metadata if isinstance(msg.metadata, dict) else {},
+                            approval_request=request,
+                            history_messages=(
+                                resume_history if isinstance(resume_history, list) else None
+                            ),
+                        )
+                        self._set_resume_state(session, state)
                     await self._publish_exec_approval_prompt(request)
                     self._schedule_sim_auth_after_pending(request)
                     suppress_outbound_for_pending = self._is_feishu_card_approval_enabled(request)
-        if stop_reason in {"max_iterations", "loop_guard", "error_threshold"}:
-            session.metadata["pending_task"] = loop_meta.get("pending_task", effective_content)
         else:
-            session.metadata.pop("pending_task", None)
+            resume_messages = loop_meta.get("resume_messages")
+            if stop_reason in {"max_iterations", "loop_guard", "error_threshold", "llm_error", "empty_response"} and isinstance(resume_messages, list):
+                state = self._build_resume_state(
+                    status="paused",
+                    reason=str(stop_reason),
+                    user_goal=effective_content,
+                    messages=resume_messages,
+                    disabled_tools=disabled_tools,
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    sender_id=msg.sender_id,
+                    metadata=msg.metadata if isinstance(msg.metadata, dict) else {},
+                )
+                self._set_resume_state(session, state)
+            elif stop_reason not in {"exec_approval_pending"}:
+                self._set_resume_state(session, None)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

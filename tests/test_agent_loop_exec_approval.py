@@ -173,6 +173,82 @@ async def test_exec_approval_pending_then_approve_resumes_blocked_loop(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_exec_approval_can_resume_after_gateway_restart(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    target = workspace / "cleanup_restart.txt"
+    target.write_text("trash", encoding="utf-8")
+    command = f"rm -f {target}"
+
+    provider = ExecApprovalProvider(command)
+    first_bus = MessageBus()
+    first_loop = AgentLoop(
+        bus=first_bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+    )
+
+    first_response = await first_loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content="Please clean temp file",
+            metadata={
+                "msg_type": "text",
+                "message_id": "om_exec_restart_1",
+                "_suppress_progress": True,
+            },
+        )
+    )
+    assert first_response is None
+
+    card_prompt = await asyncio.wait_for(first_bus.consume_outbound(), timeout=1.0)
+    approval_id = str(card_prompt.metadata.get("_exec_approval_id") or "")
+    assert re.fullmatch(r"[0-9a-f]{10}", approval_id)
+
+    second_bus = MessageBus()
+    second_loop = AgentLoop(
+        bus=second_bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+    )
+
+    approve_response = await second_loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="oc_group_1",
+            content=f"/approve {approval_id} allow-once",
+            metadata={
+                "msg_type": "interactive",
+                "message_id": "om_exec_restart_2",
+                "_suppress_progress": True,
+                "source": "card_action",
+            },
+        )
+    )
+
+    assert approve_response is None
+
+    final_notice = await asyncio.wait_for(second_bus.consume_outbound(), timeout=1.0)
+    assert final_notice.content == "done"
+    assert not target.exists()
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
 async def test_exec_approval_rejects_manual_text_approve_for_card_flow(tmp_path: Path) -> None:
     bus = MessageBus()
     workspace = tmp_path / "ws"

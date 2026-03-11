@@ -24,9 +24,8 @@ class _DummyProvider(LLMProvider):
         ("oc_group_1", "@_user_1 /go", "om_go_group"),
     ],
 )
-async def test_go_command_reuses_pending_task_in_dm_and_group(
+async def test_go_command_requires_persisted_resume_state(
     tmp_path: Path,
-    monkeypatch,
     chat_id: str,
     content: str,
     message_id: str,
@@ -37,22 +36,6 @@ async def test_go_command_reuses_pending_task_in_dm_and_group(
         workspace=tmp_path,
         model="dummy/test-model",
     )
-    seen: dict[str, object] = {}
-    session = loop.sessions.get_or_create(f"feishu:{chat_id}")
-    session.metadata["pending_task"] = "check the latest logs"
-    loop.sessions.save(session)
-
-    async def _fake_run_agent_loop(
-        initial_messages,
-        user_goal,
-        debug_log=None,
-        on_progress=None,
-        disabled_tools=None,
-    ):
-        seen["user_goal"] = user_goal
-        return "continued", [], {"history_messages": [], "stopped_reason": "completed"}
-
-    monkeypatch.setattr(loop, "_run_agent_loop", _fake_run_agent_loop)
 
     response = await loop._process_message(
         InboundMessage(
@@ -65,8 +48,68 @@ async def test_go_command_reuses_pending_task_in_dm_and_group(
     )
 
     assert response is not None
-    assert response.content == "continued"
-    assert seen["user_goal"] == "Continue unfinished task with current context: check the latest logs"
+    assert response.content == "No paused task to resume."
+
+
+@pytest.mark.asyncio
+async def test_go_command_reuses_persisted_resume_state_without_prompt_injection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_DummyProvider(),
+        workspace=tmp_path,
+        model="dummy/test-model",
+    )
+    seen: dict[str, object] = {}
+    session = loop.sessions.get_or_create("feishu:ou_user_resume")
+    resume_messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "original request"},
+        {"role": "assistant", "content": "partial progress"},
+        {"role": "user", "content": AgentLoop.REFLECT_PROMPT},
+    ]
+    session.metadata[AgentLoop.RESUME_STATE_METADATA_KEY] = {
+        "version": 1,
+        "status": "paused",
+        "reason": "max_iterations",
+        "user_goal": "finish the work",
+        "messages": resume_messages,
+        "disabled_tools": ["spawn"],
+    }
+    loop.sessions.save(session)
+
+    async def _fake_run_agent_loop(
+        initial_messages,
+        user_goal,
+        debug_log=None,
+        on_progress=None,
+        disabled_tools=None,
+        on_checkpoint=None,
+    ):
+        seen["initial_messages"] = initial_messages
+        seen["user_goal"] = user_goal
+        seen["disabled_tools"] = disabled_tools
+        return "resumed", [], {"history_messages": [], "stopped_reason": "completed"}
+
+    monkeypatch.setattr(loop, "_run_agent_loop", _fake_run_agent_loop)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_requester",
+            chat_id="ou_user_resume",
+            content="/go",
+            metadata={"msg_type": "text", "message_id": "om_go_resume"},
+        )
+    )
+
+    assert response is not None
+    assert response.content == "resumed"
+    assert seen["user_goal"] == "finish the work"
+    assert seen["initial_messages"] == resume_messages
+    assert seen["disabled_tools"] == {"spawn"}
 
 
 def test_incomplete_response_instructs_user_to_send_go(tmp_path: Path) -> None:

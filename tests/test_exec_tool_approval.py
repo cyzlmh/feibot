@@ -12,7 +12,7 @@ def _card_mode(*_args: object) -> str:
 
 @pytest.mark.asyncio
 async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -> None:
-    manager = ExecApprovalManager(enabled=True, timeout_sec=120)
+    manager = ExecApprovalManager(enabled=True)
     tool = ExecTool(
         timeout=5,
         working_dir=str(tmp_path),
@@ -51,7 +51,7 @@ async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_exec_tool_requires_approval_for_dangerous_pattern(tmp_path: Path) -> None:
-    manager = ExecApprovalManager(enabled=True, timeout_sec=120)
+    manager = ExecApprovalManager(enabled=True)
     tool = ExecTool(
         timeout=5,
         working_dir=str(tmp_path),
@@ -78,7 +78,7 @@ async def test_exec_tool_requires_approval_for_dangerous_pattern(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_exec_tool_requires_approval_for_pipe_to_shell(tmp_path: Path) -> None:
-    manager = ExecApprovalManager(enabled=True, timeout_sec=120)
+    manager = ExecApprovalManager(enabled=True)
     tool = ExecTool(
         timeout=5,
         working_dir=str(tmp_path),
