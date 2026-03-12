@@ -1,7 +1,6 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from typing import ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -111,24 +110,21 @@ class WebToolsConfig(BaseModel):
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
 
-    _APPROVAL_MODES: ClassVar[set[str]] = {"", "none", "feishu_card"}
-
     timeout: int = 60
     path_append: str = ""
     approval_enabled: bool = True
-    approval_confirm_mode: str = ""  # Empty/none means confirm-risk actions run without HITL.
-    approval_dangerous_mode: str = ""  # Effective dangerous mode is max(confirm, dangerous).
+    approval_risk_level: str = ""  # Empty/none disables approval. dangerous=only dangerous, confirm=confirm+dangerous.
     approval_approvers: list[str] = Field(default_factory=list)  # Empty means requester only
 
-    @field_validator("approval_confirm_mode", "approval_dangerous_mode", mode="before")
+    @field_validator("approval_risk_level", mode="before")
     @classmethod
-    def _validate_approval_mode(cls, value: object) -> str:
-        mode = str(value or "").strip().lower()
-        if mode == "text":
-            mode = "feishu_card"
-        if mode not in cls._APPROVAL_MODES:
-            raise ValueError("approval mode must be one of: none, feishu_card")
-        return mode
+    def _validate_approval_risk_level(cls, value: object) -> str:
+        level = str(value or "").strip().lower()
+        if level in {"text", "feishu_card"}:
+            return "confirm"
+        if level in {"", "none", "dangerous", "confirm"}:
+            return level
+        raise ValueError("approval risk level must be one of: none, dangerous, confirm")
 
 
 class ToolsConfig(BaseModel):

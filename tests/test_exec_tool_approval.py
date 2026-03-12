@@ -6,7 +6,7 @@ from feibot.agent.exec_approval import ExecApprovalManager
 from feibot.agent.tools.shell import ExecTool
 
 
-def _card_mode(*_args: object) -> str:
+def _card_workflow(*_args: object) -> str:
     return "feishu_card"
 
 
@@ -18,7 +18,7 @@ async def test_exec_tool_requires_approval_for_confirm_pattern(tmp_path: Path) -
         working_dir=str(tmp_path),
         restrict_to_workspace=True,
         approval_manager=manager,
-        approval_mode_resolver=_card_mode,
+        approval_workflow_resolver=_card_workflow,
     )
     tool.set_context(
         channel="feishu",
@@ -57,7 +57,7 @@ async def test_exec_tool_requires_approval_for_dangerous_pattern(tmp_path: Path)
         working_dir=str(tmp_path),
         restrict_to_workspace=False,
         approval_manager=manager,
-        approval_mode_resolver=_card_mode,
+        approval_workflow_resolver=_card_workflow,
     )
     tool.set_context(
         channel="feishu",
@@ -84,7 +84,7 @@ async def test_exec_tool_requires_approval_for_pipe_to_shell(tmp_path: Path) -> 
         working_dir=str(tmp_path),
         restrict_to_workspace=False,
         approval_manager=manager,
-        approval_mode_resolver=_card_mode,
+        approval_workflow_resolver=_card_workflow,
     )
     tool.set_context(
         channel="feishu",

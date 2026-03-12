@@ -42,7 +42,7 @@ class ExecTool(Tool):
         allowed_dirs: list[str] | None = None,
         path_append: str = "",
         approval_manager: ExecApprovalManager | None = None,
-        approval_mode_resolver: Callable[[RiskLevel, str, str], str] | None = None,
+        approval_workflow_resolver: Callable[[RiskLevel, str, str], str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -74,7 +74,7 @@ class ExecTool(Tool):
         self.allowed_dirs = [Path(d).expanduser().resolve() for d in (allowed_dirs or [])]
         self.path_append = path_append
         self.approval_manager = approval_manager
-        self.approval_mode_resolver = approval_mode_resolver
+        self.approval_workflow_resolver = approval_workflow_resolver
         self._channel_ctx: ContextVar[str] = ContextVar("exec_default_channel", default="")
         self._chat_id_ctx: ContextVar[str] = ContextVar("exec_default_chat_id", default="")
         self._sender_id_ctx: ContextVar[str] = ContextVar("exec_default_sender_id", default="")
@@ -126,9 +126,9 @@ class ExecTool(Tool):
         if guard_error:
             return guard_error
         risk_level = self._risk_level(command)
-        approval_mode = self._resolve_approval_mode(risk_level)
-        if not approval_granted and risk_level is not None and approval_mode != "none":
-            if approval_mode == "unavailable":
+        approval_workflow = self._resolve_approval_workflow(risk_level)
+        if not approval_granted and risk_level is not None and approval_workflow != "none":
+            if approval_workflow == "unavailable":
                 channel = self._channel_ctx.get() or "unknown"
                 return (
                     "Error: Command requires approval, but no supported approval workflow "
@@ -198,26 +198,26 @@ class ExecTool(Tool):
         if not self.approval_manager or not self.approval_manager.enabled:
             return False
         risk_level = self._risk_level(command)
-        return risk_level is not None and self._resolve_approval_mode(risk_level) not in {
+        return risk_level is not None and self._resolve_approval_workflow(risk_level) not in {
             "none",
             "unavailable",
         }
 
-    def _resolve_approval_mode(self, risk_level: RiskLevel | None) -> str:
+    def _resolve_approval_workflow(self, risk_level: RiskLevel | None) -> str:
         if risk_level is None:
             return "none"
-        if self.approval_mode_resolver is None:
+        if self.approval_workflow_resolver is None:
             return "feishu_card"
-        mode = str(
-            self.approval_mode_resolver(
+        workflow = str(
+            self.approval_workflow_resolver(
                 risk_level,
                 self._channel_ctx.get(),
                 self._sender_id_ctx.get(),
             )
             or "feishu_card"
         ).strip().lower()
-        if mode in {"none", "feishu_card", "unavailable"}:
-            return mode
+        if workflow in {"none", "feishu_card", "unavailable"}:
+            return workflow
         return "feishu_card"
 
     def _requires_confirmation(self, command: str) -> bool:

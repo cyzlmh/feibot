@@ -57,14 +57,51 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
     if "approvalConfirmMode" not in exec_cfg and "approvalMode" in exec_cfg:
         exec_cfg["approvalConfirmMode"] = exec_cfg.pop("approvalMode")
     if "approvalDangerousMode" not in exec_cfg and "approvalHardDangerMode" in exec_cfg:
         exec_cfg["approvalDangerousMode"] = exec_cfg.pop("approvalHardDangerMode")
-    for key in ("approvalConfirmMode", "approvalDangerousMode"):
-        if str(exec_cfg.get(key) or "").strip().lower() == "text":
-            exec_cfg[key] = "feishu_card"
+
+    if "approvalRiskLevel" not in exec_cfg:
+        exec_cfg["approvalRiskLevel"] = _infer_approval_risk_level(exec_cfg)
+    else:
+        exec_cfg["approvalRiskLevel"] = _normalize_approval_risk_level(exec_cfg.get("approvalRiskLevel"))
+
+    exec_cfg.pop("approvalConfirmMode", None)
+    exec_cfg.pop("approvalDangerousMode", None)
     return data
+
+
+def _normalize_approval_risk_level(value: Any) -> str:
+    """Normalize approval risk level from current or legacy config values."""
+    level = str(value or "").strip().lower()
+    if level in {"", "none", "dangerous", "confirm"}:
+        return level
+    if level in {"text", "feishu_card"}:
+        return "confirm"
+    return ""
+
+
+def _normalize_legacy_approval_mode(value: Any) -> str:
+    """Normalize legacy approval mode fields used before approvalRiskLevel."""
+    mode = str(value or "").strip().lower()
+    if mode == "text":
+        mode = "feishu_card"
+    if mode in {"", "none", "feishu_card"}:
+        return mode
+    return ""
+
+
+def _infer_approval_risk_level(exec_cfg: dict[str, Any]) -> str:
+    """Infer approvalRiskLevel from older confirm/dangerous mode settings."""
+    confirm_mode = _normalize_legacy_approval_mode(exec_cfg.get("approvalConfirmMode"))
+    dangerous_mode = _normalize_legacy_approval_mode(exec_cfg.get("approvalDangerousMode"))
+    if confirm_mode == "feishu_card":
+        return "confirm"
+    if dangerous_mode == "feishu_card":
+        return "dangerous"
+    return ""
 
 
 def convert_keys(data: Any) -> Any:

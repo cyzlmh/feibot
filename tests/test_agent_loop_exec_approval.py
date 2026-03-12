@@ -98,7 +98,7 @@ async def test_exec_approval_pending_then_approve_resumes_blocked_loop(tmp_path:
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     response = await loop._process_message(
@@ -190,7 +190,7 @@ async def test_exec_approval_can_resume_after_gateway_restart(tmp_path: Path) ->
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     first_response = await first_loop._process_message(
@@ -221,7 +221,7 @@ async def test_exec_approval_can_resume_after_gateway_restart(tmp_path: Path) ->
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     approve_response = await second_loop._process_message(
@@ -266,7 +266,7 @@ async def test_exec_approval_rejects_manual_text_approve_for_card_flow(tmp_path:
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     response = await loop._process_message(
@@ -308,7 +308,7 @@ async def test_exec_approval_rejects_manual_text_approve_for_card_flow(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_exec_confirm_mode_none_runs_without_hitl(tmp_path: Path) -> None:
+async def test_exec_confirm_risk_runs_without_hitl_when_threshold_is_dangerous(tmp_path: Path) -> None:
     bus = MessageBus()
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -326,10 +326,7 @@ async def test_exec_confirm_mode_none_runs_without_hitl(tmp_path: Path) -> None:
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(
-            approval_confirm_mode="none",
-            approval_dangerous_mode="feishu_card",
-        ),
+        exec_config=ExecToolConfig(approval_risk_level="dangerous"),
     )
 
     response = await loop._process_message(
@@ -373,7 +370,7 @@ async def test_exec_approval_card_deny_stops_loop(tmp_path: Path) -> None:
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     first = await loop._process_message(
@@ -426,7 +423,7 @@ async def test_exec_approval_card_deny_stops_loop(tmp_path: Path) -> None:
     )
 
 
-def test_unset_approval_modes_default_to_none(tmp_path: Path) -> None:
+def test_unset_approval_risk_level_defaults_to_none(tmp_path: Path) -> None:
     loop = AgentLoop(
         bus=MessageBus(),
         provider=ExecApprovalProvider("rm -f /tmp/unused"),
@@ -436,8 +433,8 @@ def test_unset_approval_modes_default_to_none(tmp_path: Path) -> None:
         exec_config=ExecToolConfig(),
     )
 
-    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="confirm") == "none"
-    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="dangerous") == "none"
+    assert loop._approval_workflow("feishu", risk_level="confirm") == "none"
+    assert loop._approval_workflow("feishu", risk_level="dangerous") == "none"
 
 
 @pytest.mark.asyncio
@@ -459,7 +456,7 @@ async def test_exec_approval_card_deny_prevents_next_turn_replay(tmp_path: Path)
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=True,
-        exec_config=ExecToolConfig(approval_confirm_mode="feishu_card"),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
     first = await loop._process_message(
@@ -515,24 +512,24 @@ async def test_exec_approval_card_deny_prevents_next_turn_replay(tmp_path: Path)
     assert target.exists()
 
 
-def test_dangerous_mode_inherits_stronger_confirm_mode(tmp_path: Path) -> None:
+def test_confirm_threshold_covers_dangerous_commands(tmp_path: Path) -> None:
     loop = AgentLoop(
         bus=MessageBus(),
         provider=ExecApprovalProvider("rm -f /tmp/unused"),
         workspace=tmp_path,
         model="dummy/test-model",
         memory_window=20,
-        exec_config=ExecToolConfig(
-            approval_confirm_mode="feishu_card",
-            approval_dangerous_mode="none",
-        ),
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
     )
 
-    assert loop._approval_mode("feishu", sender_id="ou_requester", risk_level="dangerous") == "feishu_card"
+    assert (
+        loop._approval_workflow("feishu", risk_level="dangerous")
+        == "feishu_card"
+    )
 
 
 @pytest.mark.asyncio
-async def test_exec_approval_dangerous_mode_can_use_feishu_card(tmp_path: Path) -> None:
+async def test_exec_approval_dangerous_threshold_uses_feishu_card(tmp_path: Path) -> None:
     bus = MessageBus()
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -547,10 +544,7 @@ async def test_exec_approval_dangerous_mode_can_use_feishu_card(tmp_path: Path) 
         max_iterations=5,
         memory_window=20,
         restrict_to_workspace=False,
-        exec_config=ExecToolConfig(
-            approval_confirm_mode="none",
-            approval_dangerous_mode="feishu_card",
-        ),
+        exec_config=ExecToolConfig(approval_risk_level="dangerous"),
     )
 
     response = await loop._process_message(

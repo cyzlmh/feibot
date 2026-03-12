@@ -90,8 +90,6 @@ class AgentLoop:
     RESUME_STATE_METADATA_KEY = "resume_state"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
     REFLECT_PROMPT = "Reflect on the results and decide next steps."
-    _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card"}
-    _APPROVAL_MODE_STRENGTH = {"none": 0, "feishu_card": 1}
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
@@ -101,6 +99,7 @@ class AgentLoop:
         "/chatid — Show your user/chat IDs\n"
         "/sp [label] — Open a Feishu subtask group chat"
     )
+
     def __init__(
         self,
         bus: MessageBus,
@@ -172,23 +171,12 @@ class AgentLoop:
         self._approval_execution_tasks: set[asyncio.Task[None]] = set()
         self._register_default_tools()
 
-    @classmethod
-    def _normalize_approval_mode_value(cls, raw: Any, *, fallback: str = "none") -> str:
-        mode = str(raw or "").strip().lower()
-        if mode == "text":
-            mode = "feishu_card"
-        if mode in cls._SUPPORTED_APPROVAL_MODES:
-            return mode
-        return fallback
-
-    @classmethod
-    def _max_approval_mode(cls, *modes: str) -> str:
-        strongest = "none"
-        for mode in modes:
-            normalized = cls._normalize_approval_mode_value(mode, fallback="none")
-            if cls._APPROVAL_MODE_STRENGTH[normalized] > cls._APPROVAL_MODE_STRENGTH[strongest]:
-                strongest = normalized
-        return strongest
+    @staticmethod
+    def _normalize_approval_risk_level(raw: Any) -> str:
+        level = str(raw or "").strip().lower()
+        if level in {"", "none", "dangerous", "confirm"}:
+            return level
+        return ""
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -209,9 +197,8 @@ class AgentLoop:
             allowed_dirs=self.allowed_dirs,
             path_append=self.exec_config.path_append,
             approval_manager=self.exec_approvals,
-            approval_mode_resolver=lambda risk_level, channel, sender_id: self._approval_mode(
+            approval_workflow_resolver=lambda risk_level, channel, _sender_id: self._approval_workflow(
                 channel,
-                sender_id=sender_id,
                 risk_level=risk_level,
             ),
         ))
@@ -403,35 +390,28 @@ class AgentLoop:
             return text
         return f"{text[: max_chars - 3]}..."
 
-    def _approval_mode(
+    def _approval_workflow(
         self,
         channel: str,
         *,
-        sender_id: str = "",
         risk_level: str = "confirm",
     ) -> str:
         if not bool(getattr(self.exec_config, "approval_enabled", True)):
             return "none"
 
-        confirm_mode = self._normalize_approval_mode_value(
-            getattr(self.exec_config, "approval_confirm_mode", ""),
-            fallback="none",
+        configured_level = self._normalize_approval_risk_level(
+            getattr(self.exec_config, "approval_risk_level", "")
         )
-        dangerous_mode = self._normalize_approval_mode_value(
-            getattr(self.exec_config, "approval_dangerous_mode", ""),
-            fallback="none",
+        requires_approval = (
+            configured_level == "confirm"
+            or (configured_level == "dangerous" and risk_level == "dangerous")
         )
 
-        if risk_level == "dangerous":
-            mode = self._max_approval_mode(confirm_mode, dangerous_mode)
-        else:
-            mode = confirm_mode
-
-        if mode == "none":
-            return mode
-        if mode == "feishu_card" and channel != "feishu":
+        if not requires_approval:
+            return "none"
+        if channel != "feishu":
             return "unavailable"
-        return mode
+        return "feishu_card"
 
     def _build_exec_approval_card(self, request: ExecApprovalRequest) -> dict[str, Any]:
         command_block = self._format_command_as_markdown(request.command)
@@ -511,7 +491,7 @@ class AgentLoop:
         }
 
     async def _publish_exec_approval_prompt(self, request: ExecApprovalRequest) -> None:
-        card_enabled = self._is_feishu_card_approval_enabled(request)
+        card_enabled = self._uses_feishu_card_approval(request)
         if request.channel == "feishu" and card_enabled:
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -527,13 +507,12 @@ class AgentLoop:
             )
             return
 
-    def _is_feishu_card_approval_enabled(self, request: ExecApprovalRequest) -> bool:
-        mode = self._approval_mode(
+    def _uses_feishu_card_approval(self, request: ExecApprovalRequest) -> bool:
+        workflow = self._approval_workflow(
             request.channel,
-            sender_id=request.requester_id,
             risk_level=str(request.risk_level or "confirm"),
         )
-        return mode == "feishu_card"
+        return workflow == "feishu_card"
 
     @staticmethod
     def _replace_exec_approval_pending_result(
@@ -1553,9 +1532,7 @@ class AgentLoop:
                             remaining_tool_calls=response.tool_calls[tool_index + 1:],
                             reason="tool execution deferred because exec approval paused the loop",
                         )
-                        card_only_mode = bool(
-                            request and self._is_feishu_card_approval_enabled(request)
-                        )
+                        card_only_mode = bool(request and self._uses_feishu_card_approval(request))
                         final_content = (
                             f"Exec approval required (ID: {request.id})."
                             if card_only_mode and request
@@ -2200,7 +2177,7 @@ class AgentLoop:
                         )
                         self._set_resume_state(session, state)
                     await self._publish_exec_approval_prompt(request)
-                    suppress_outbound_for_pending = self._is_feishu_card_approval_enabled(request)
+                    suppress_outbound_for_pending = self._uses_feishu_card_approval(request)
         else:
             resume_messages = loop_meta.get("resume_messages")
             if stop_reason in {"max_iterations", "loop_guard", "error_threshold", "llm_error", "empty_response"} and isinstance(resume_messages, list):

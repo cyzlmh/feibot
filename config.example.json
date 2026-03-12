@@ -60,9 +60,7 @@
       "timeout": 300,
       "pathAppend": "",
       "approvalEnabled": true,
-      "approvalConfirmMode": "none",
-      "approvalDangerousMode": "feishu_card",
-      "approvalTimeoutSec": 120,
+      "approvalRiskLevel": "dangerous",
       "approvalApprovers": []
     },
     "restrictToWorkspace": true
