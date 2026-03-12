@@ -18,7 +18,6 @@ from feibot.agent.exec_approval import (
     ExecApprovalResolution,
 )
 from feibot.agent.memory import MemoryStore
-from feibot.agent.sim_auth import SimAuthResolver
 from feibot.agent.subagent import SubagentManager
 from feibot.agent.tools.cron import CronTool
 from feibot.agent.tools.feishu import (
@@ -38,7 +37,7 @@ from feibot.agent.tools.spawn import SpawnTool
 from feibot.agent.tools.web import WebFetchTool, WebSearchTool
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
-from feibot.channels.allow_from import extract_allow_from_msisdn_map, extract_allow_from_open_ids
+from feibot.channels.allow_from import extract_allow_from_open_ids
 from feibot.providers.base import LLMProvider
 from feibot.session.channel_log import ChannelLogStore, LogEntry
 from feibot.session.manager import Session, SessionManager
@@ -91,8 +90,8 @@ class AgentLoop:
     RESUME_STATE_METADATA_KEY = "resume_state"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
     REFLECT_PROMPT = "Reflect on the results and decide next steps."
-    _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card", "sim_auth"}
-    _APPROVAL_MODE_STRENGTH = {"none": 0, "feishu_card": 1, "sim_auth": 2}
+    _SUPPORTED_APPROVAL_MODES = {"none", "feishu_card"}
+    _APPROVAL_MODE_STRENGTH = {"none": 0, "feishu_card": 1}
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
@@ -102,16 +101,6 @@ class AgentLoop:
         "/chatid — Show your user/chat IDs\n"
         "/sp [label] — Open a Feishu subtask group chat"
     )
-    _MISLEADING_SUCCESS_REASONS = {
-        "success",
-        "ok",
-        "passed",
-        "approved",
-        "成功",
-        "处理成功",
-        "通过",
-    }
-
     def __init__(
         self,
         bus: MessageBus,
@@ -156,52 +145,6 @@ class AgentLoop:
             enabled=bool(getattr(self.exec_config, "approval_enabled", True)),
             approvers=list(getattr(self.exec_config, "approval_approvers", []) or []),
         )
-        allow_from_entries = (
-            list(getattr(self.feishu_config, "allow_from", []) or []) if self.feishu_config else []
-        )
-        self.sim_auth_resolver = SimAuthResolver(
-            verify_url=str(getattr(self.exec_config, "approval_sim_auth_url", "") or "").strip(),
-            api_key=str(getattr(self.exec_config, "approval_sim_auth_api_key", "") or "").strip(),
-            timeout_sec=int(getattr(self.exec_config, "approval_sim_auth_timeout_sec", 90) or 90),
-            extra_headers=dict(getattr(self.exec_config, "approval_sim_auth_extra_headers", {}) or {}),
-            cmcc_host=str(getattr(self.exec_config, "approval_sim_auth_host", "") or "").strip(),
-            cmcc_send_auth_path=str(
-                getattr(self.exec_config, "approval_sim_auth_send_auth_path", "") or ""
-            ).strip(),
-            cmcc_get_result_path=str(
-                getattr(self.exec_config, "approval_sim_auth_get_result_path", "") or ""
-            ).strip(),
-            cmcc_ap_id=str(getattr(self.exec_config, "approval_sim_auth_ap_id", "") or "").strip(),
-            cmcc_app_id=str(getattr(self.exec_config, "approval_sim_auth_app_id", "") or "").strip(),
-            cmcc_private_key=str(
-                getattr(self.exec_config, "approval_sim_auth_private_key", "") or ""
-            ).strip(),
-            cmcc_msisdn_map=extract_allow_from_msisdn_map(allow_from_entries),
-            cmcc_template_id=str(
-                getattr(self.exec_config, "approval_sim_auth_template_id", "") or ""
-            ).strip(),
-            cmcc_callback_url=str(
-                getattr(self.exec_config, "approval_sim_auth_callback_url", "") or ""
-            ).strip(),
-            cmcc_callback_timeout_sec=int(
-                getattr(self.exec_config, "approval_sim_auth_callback_timeout_sec", 65) or 65
-            ),
-            cmcc_poll_interval_sec=float(
-                getattr(self.exec_config, "approval_sim_auth_poll_interval_sec", 2.0) or 2.0
-            ),
-            cmcc_poll_timeout_sec=int(
-                getattr(self.exec_config, "approval_sim_auth_poll_timeout_sec", 65) or 65
-            ),
-            cmcc_callback_listen_host=str(
-                getattr(self.exec_config, "approval_sim_auth_callback_listen_host", "") or ""
-            ).strip(),
-            cmcc_callback_listen_port=int(
-                getattr(self.exec_config, "approval_sim_auth_callback_listen_port", 0) or 0
-            ),
-            cmcc_callback_path=str(
-                getattr(self.exec_config, "approval_sim_auth_callback_path", "/callback") or "/callback"
-            ).strip(),
-        )
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace / "sessions")
@@ -227,9 +170,6 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._approval_execution_tasks: set[asyncio.Task[None]] = set()
-        self._sim_auth_tasks: set[asyncio.Task[None]] = set()
-        self._sim_auth_pending_ids: set[str] = set()
-        self._sim_auth_warned_missing_config = False
         self._register_default_tools()
 
     @classmethod
@@ -491,13 +431,6 @@ class AgentLoop:
             return mode
         if mode == "feishu_card" and channel != "feishu":
             return "unavailable"
-        if mode == "sim_auth" and not self.sim_auth_resolver.can_verify_requester(sender_id):
-            if not self._sim_auth_warned_missing_config and not self.sim_auth_resolver.enabled:
-                logger.warning(
-                    "Exec approval mode is sim_auth but SIM-auth config is incomplete."
-                )
-                self._sim_auth_warned_missing_config = True
-            return "unavailable"
         return mode
 
     def _build_exec_approval_card(self, request: ExecApprovalRequest) -> dict[str, Any]:
@@ -601,15 +534,6 @@ class AgentLoop:
             risk_level=str(request.risk_level or "confirm"),
         )
         return mode == "feishu_card"
-
-    def _is_sim_auth_approval_enabled(self, request: ExecApprovalRequest) -> bool:
-        if self._approval_mode(
-            request.channel,
-            sender_id=request.requester_id,
-            risk_level=str(request.risk_level or "confirm"),
-        ) != "sim_auth":
-            return False
-        return self.sim_auth_resolver.can_verify_request(request)
 
     @staticmethod
     def _replace_exec_approval_pending_result(
@@ -825,24 +749,6 @@ class AgentLoop:
         next_state.pop("approval_request", None)
         return next_state
 
-    async def _request_sim_auth_decision(
-        self,
-        request: ExecApprovalRequest,
-    ) -> tuple[ApprovalDecision, str]:
-        """Request decision from SIM-auth resolver."""
-        verdict = await self.sim_auth_resolver.verify(request)
-        return verdict.decision, self._normalize_sim_auth_reason(verdict.decision, verdict.reason)
-
-    @classmethod
-    def _normalize_sim_auth_reason(cls, decision: ApprovalDecision, reason: str) -> str:
-        text = str(reason or "").strip()
-        if decision != "deny":
-            return text
-        normalized = text.lower().strip(" .!?,;:，。！？；：")
-        if normalized and normalized not in cls._MISLEADING_SUCCESS_REASONS:
-            return text
-        return "SIM auth rejected."
-
     async def _record_exec_deny_history(
         self,
         resolution: ExecApprovalResolution,
@@ -931,73 +837,6 @@ class AgentLoop:
             str(state.get("sender_id") or fallback_sender_id),
             dict(metadata) if isinstance(metadata, dict) else dict(fallback_metadata or {}),
         )
-
-    def _schedule_sim_auth_after_pending(self, request: ExecApprovalRequest) -> None:
-        if not self._is_sim_auth_approval_enabled(request):
-            return
-        if request.id in self._sim_auth_pending_ids:
-            return
-        self._sim_auth_pending_ids.add(request.id)
-        task = asyncio.create_task(self._run_sim_auth_after_pending(request))
-        self._sim_auth_tasks.add(task)
-
-        def _cleanup(t: asyncio.Task[None]) -> None:
-            self._sim_auth_tasks.discard(t)
-            self._sim_auth_pending_ids.discard(request.id)
-
-        task.add_done_callback(_cleanup)
-
-    async def _run_sim_auth_after_pending(self, request: ExecApprovalRequest) -> None:
-        decision, reason = await self._request_sim_auth_decision(request)
-        resolution, error = self.exec_approvals.resolve(
-            approval_id=request.id,
-            decision=decision,
-            resolved_by=request.requester_id,
-        )
-        if resolution is None:
-            err_text = str(error or "").strip()
-            if "not found" in err_text.lower():
-                logger.debug(
-                    "SimAuth ignored stale approval {}: {}",
-                    request.id,
-                    err_text or "request missing",
-                )
-                return
-            logger.warning(
-                "SimAuth resolution failed for approval {}: {}",
-                request.id,
-                err_text or "unknown error",
-            )
-            if reason:
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=request.channel,
-                        chat_id=request.chat_id,
-                        content=f"❌ SimAuth verification failed (ID: {request.id}): {reason}",
-                        metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
-                    )
-                )
-            return
-
-        if resolution.decision == "deny":
-            content = f"❌ SimAuth denied exec approval (ID: {resolution.request.id})."
-            if reason:
-                content = f"{content}\nReason: {reason}"
-            await self._record_exec_deny_history(
-                resolution,
-                denial_content=content,
-            )
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=request.channel,
-                    chat_id=request.chat_id,
-                    content=content,
-                    metadata={"_suppress_progress": True, "_exec_approval_id": request.id},
-                )
-            )
-            return
-
-        self._schedule_exec_after_approval(resolution)
 
     async def _run_approved_exec(self, resolution: ExecApprovalResolution) -> None:
         request = resolution.request
@@ -1177,7 +1016,6 @@ class AgentLoop:
                             )
                             self._set_resume_state(session, state)
                             await self._publish_exec_approval_prompt(followup_request)
-                            self._schedule_sim_auth_after_pending(followup_request)
                     self.sessions.save(session)
                     return
 
@@ -1718,14 +1556,9 @@ class AgentLoop:
                         card_only_mode = bool(
                             request and self._is_feishu_card_approval_enabled(request)
                         )
-                        sim_auth_mode = bool(
-                            request and self._is_sim_auth_approval_enabled(request)
-                        )
                         final_content = (
                             f"Exec approval required (ID: {request.id})."
                             if card_only_mode and request
-                            else f"Exec approval pending SimAuth verification (ID: {request.id})."
-                            if sim_auth_mode and request
                             else self.exec_approvals.describe_request_text(request)
                             if request
                             else (
@@ -1920,15 +1753,6 @@ class AgentLoop:
             if not task.done():
                 task.cancel()
         self._approval_execution_tasks.clear()
-        for task in list(self._sim_auth_tasks):
-            if not task.done():
-                task.cancel()
-        self._sim_auth_tasks.clear()
-        self._sim_auth_pending_ids.clear()
-        try:
-            self.sim_auth_resolver.close()
-        except Exception:
-            logger.exception("Failed to close SimAuth resolver.")
         logger.info("Agent loop stopping")
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
@@ -2376,7 +2200,6 @@ class AgentLoop:
                         )
                         self._set_resume_state(session, state)
                     await self._publish_exec_approval_prompt(request)
-                    self._schedule_sim_auth_after_pending(request)
                     suppress_outbound_for_pending = self._is_feishu_card_approval_enabled(request)
         else:
             resume_messages = loop_meta.get("resume_messages")

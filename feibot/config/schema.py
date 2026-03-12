@@ -14,7 +14,9 @@ class FeishuConfig(BaseModel):
     app_secret: str = ""  # App Secret from Feishu Open Platform
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
-    allow_from: list[str] = Field(default_factory=list)  # Allowed open_ids; supports "open_id:msisdn"
+    allow_from: list[str] = Field(
+        default_factory=list
+    )  # Allowed open_ids; legacy "open_id:phone" entries are normalized.
     wiki_space_id: str = ""  # Default enterprise wiki space ID for new docs
     wiki_parent_node_token: str = ""  # Optional default parent wiki node token
     doc_write_auto_chunk_threshold_chars: int = 6000  # 0 disables auto switch for write/append
@@ -109,7 +111,7 @@ class WebToolsConfig(BaseModel):
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
 
-    _APPROVAL_MODES: ClassVar[set[str]] = {"", "none", "feishu_card", "sim_auth"}
+    _APPROVAL_MODES: ClassVar[set[str]] = {"", "none", "feishu_card"}
 
     timeout: int = 60
     path_append: str = ""
@@ -117,25 +119,6 @@ class ExecToolConfig(BaseModel):
     approval_confirm_mode: str = ""  # Empty/none means confirm-risk actions run without HITL.
     approval_dangerous_mode: str = ""  # Effective dangerous mode is max(confirm, dangerous).
     approval_approvers: list[str] = Field(default_factory=list)  # Empty means requester only
-    approval_sim_auth_url: str = ""  # Optional sync SIM-auth verifier endpoint for exec approvals
-    approval_sim_auth_api_key: str = ""  # Optional Bearer token for SIM-auth endpoint
-    approval_sim_auth_timeout_sec: int = 90
-    approval_sim_auth_extra_headers: dict[str, str] = Field(default_factory=dict)
-    # CMCC native SIM-auth flow (sendAuth + callback/getResult)
-    approval_sim_auth_host: str = ""
-    approval_sim_auth_send_auth_path: str = ""
-    approval_sim_auth_get_result_path: str = ""
-    approval_sim_auth_ap_id: str = ""
-    approval_sim_auth_app_id: str = ""
-    approval_sim_auth_private_key: str = ""
-    approval_sim_auth_template_id: str = ""
-    approval_sim_auth_callback_url: str = ""
-    approval_sim_auth_callback_timeout_sec: int = 65
-    approval_sim_auth_poll_interval_sec: float = 2.0
-    approval_sim_auth_poll_timeout_sec: int = 65
-    approval_sim_auth_callback_listen_host: str = ""
-    approval_sim_auth_callback_listen_port: int = 0
-    approval_sim_auth_callback_path: str = "/callback"
 
     @field_validator("approval_confirm_mode", "approval_dangerous_mode", mode="before")
     @classmethod
@@ -144,7 +127,7 @@ class ExecToolConfig(BaseModel):
         if mode == "text":
             mode = "feishu_card"
         if mode not in cls._APPROVAL_MODES:
-            raise ValueError("approval mode must be one of: none, feishu_card, sim_auth")
+            raise ValueError("approval mode must be one of: none, feishu_card")
         return mode
 
 

@@ -216,7 +216,7 @@ class ExecTool(Tool):
             )
             or "feishu_card"
         ).strip().lower()
-        if mode in {"none", "feishu_card", "sim_auth", "unavailable"}:
+        if mode in {"none", "feishu_card", "unavailable"}:
             return mode
         return "feishu_card"
 

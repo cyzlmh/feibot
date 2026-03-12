@@ -49,7 +49,7 @@ Exec 命令按风险分为三类：
 - `confirm`：由 `approvalConfirmMode` 控制
 - `dangerous`：由 `approvalDangerousMode` 控制，但实际生效模式会提升为 `max(confirm, dangerous)`
 
-只保留两种 HITL 方式：`feishu_card` 和 `sim_auth`。文本 `/approve` 已移除，仅保留卡片回调入口。
+只保留一种 HITL 方式：`feishu_card`。文本 `/approve` 已移除，仅保留卡片回调入口。
 
 如果某一类没有配置模式（空字符串）或显式设为 `none`，该类命令不会插入 HITL。
 
@@ -68,19 +68,19 @@ Exec 命令按风险分为三类：
 ```
 普通 `confirm` 风险命令直接执行，`dangerous` 仍需飞书卡片审批。
 
-#### 示例 2：confirm 和 dangerous 都走 SIM 卡认证
+#### 示例 2：confirm 和 dangerous 都走飞书卡片
 ```json
 {
   "tools": {
     "exec": {
       "approvalEnabled": true,
-      "approvalConfirmMode": "sim_auth",
-      "approvalDangerousMode": "sim_auth"
+      "approvalConfirmMode": "feishu_card",
+      "approvalDangerousMode": "feishu_card"
     }
   }
 }
 ```
-需手机号二次确认，支持 CMCC SM2 签名验证。若 `dangerous` 配得比 `confirm` 更弱，会自动提升到不低于 `confirm` 的级别。
+若 `dangerous` 配得比 `confirm` 更弱，会自动提升到不低于 `confirm` 的级别。
 
 **触发审批的命令**：`rm`, `git push`, `docker`, `sudo`, `curl` 等。
 

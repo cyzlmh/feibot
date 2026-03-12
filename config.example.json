@@ -63,25 +63,7 @@
       "approvalConfirmMode": "none",
       "approvalDangerousMode": "feishu_card",
       "approvalTimeoutSec": 120,
-      "approvalApprovers": [],
-      "approvalSimAuthUrl": "",
-      "approvalSimAuthApiKey": "",
-      "approvalSimAuthTimeoutSec": 90,
-      "approvalSimAuthExtraHeaders": {},
-      "approvalSimAuthHost": "",
-      "approvalSimAuthSendAuthPath": "/trustedAuth/api/simAuth/sendAuth",
-      "approvalSimAuthGetResultPath": "/trustedAuth/api/simAuth/getSimAuthResult",
-      "approvalSimAuthApId": "",
-      "approvalSimAuthAppId": "",
-      "approvalSimAuthPrivateKey": "",
-      "approvalSimAuthTemplateId": "",
-      "approvalSimAuthCallbackUrl": "",
-      "approvalSimAuthCallbackTimeoutSec": 65,
-      "approvalSimAuthPollIntervalSec": 2.0,
-      "approvalSimAuthPollTimeoutSec": 65,
-      "approvalSimAuthCallbackListenHost": "",
-      "approvalSimAuthCallbackListenPort": 0,
-      "approvalSimAuthCallbackPath": "/callback"
+      "approvalApprovers": []
     },
     "restrictToWorkspace": true
   }

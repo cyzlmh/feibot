@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from feibot.bus.events import OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.channels.allow_from import (
-    extract_allow_from_msisdn_map,
     extract_allow_from_open_ids,
     parse_allow_from_entry,
 )
@@ -33,10 +32,9 @@ def test_parse_allow_from_entry_supports_optional_phone() -> None:
     assert parse_allow_from_entry("ou_user:13800000000") == ("ou_user", "13800000000")
 
 
-def test_extract_allow_from_helpers_normalize_entries() -> None:
+def test_extract_allow_from_open_ids_normalize_entries() -> None:
     entries = [" ou_a : 13800000000 ", "ou_b", "", " :13900000000", "ou_c: "]
     assert extract_allow_from_open_ids(entries) == ["ou_a", "ou_b", "ou_c"]
-    assert extract_allow_from_msisdn_map(entries) == {"ou_a": "13800000000"}
 
 
 def test_base_channel_allows_sender_when_allow_from_entry_contains_phone() -> None:
