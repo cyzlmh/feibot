@@ -80,7 +80,6 @@ RUN_DIR="${RUN_DIR:-$DEFAULT_RUN_DIR}"
 LAUNCHD_LABEL="${LAUNCHD_LABEL:-$DEFAULT_LAUNCHD_LABEL}"
 
 # Derived paths
-ENV_FILE="$(dirname "$CONFIG_FILE")/.env"
 LOG_FILE="$RUN_DIR/gateway.log"
 PID_FILE="$RUN_DIR/gateway.pid"
 FEIBOT_BIN="$REPO_DIR/.venv/bin/feibot"
@@ -155,7 +154,7 @@ write_plist() {
   local launch_cmd
   local launch_cmd_xml
 
-  launch_cmd="cd \"$REPO_DIR\" && export PYTHONUNBUFFERED=1 && if [[ -f \"$ENV_FILE\" ]]; then set -a && source \"$ENV_FILE\" && set +a; fi && exec \"$FEIBOT_BIN\" --config \"$CONFIG_FILE\" gateway"
+  launch_cmd="cd \"$REPO_DIR\" && export PYTHONUNBUFFERED=1 && exec \"$FEIBOT_BIN\" --config \"$CONFIG_FILE\" gateway"
   launch_cmd_xml="$(xml_escape "$launch_cmd")"
 
   cat > "$PLIST_FILE" <<EOF
