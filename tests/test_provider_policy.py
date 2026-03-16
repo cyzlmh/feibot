@@ -1,3 +1,7 @@
+import os
+
+import litellm
+
 from feibot.providers.litellm_provider import LiteLLMProvider
 
 
@@ -86,3 +90,27 @@ def test_build_chat_kwargs_respects_api_base_override() -> None:
     )
 
     assert kwargs["api_base"] == "https://api.kimi.com/coding"
+
+
+def test_provider_init_does_not_mutate_global_provider_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    _ = LiteLLMProvider(
+        api_key="test-key",
+        default_model="openai/gpt-4o-mini",
+    )
+
+    assert os.environ.get("OPENAI_API_KEY") is None
+
+
+def test_provider_init_does_not_set_global_litellm_api_base(monkeypatch) -> None:
+    sentinel = "https://global.example.invalid/v1"
+    monkeypatch.setattr(litellm, "api_base", sentinel, raising=False)
+
+    _ = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://provider.example.invalid/v1",
+        default_model="openai/gpt-4o-mini",
+    )
+
+    assert getattr(litellm, "api_base", None) == sentinel
