@@ -69,6 +69,20 @@ class _SendResponse:
         return self._log_id
 
 
+def _markdown_tables(count: int) -> str:
+    blocks: list[str] = []
+    for idx in range(count):
+        blocks.append(
+            (
+                f"### Table {idx + 1}\n"
+                "| Col A | Col B |\n"
+                "| --- | --- |\n"
+                f"| Value {idx} | Data {idx} |"
+            )
+        )
+    return "\n\n".join(blocks)
+
+
 def test_extract_post_content_collects_text_and_image_keys(tmp_path: Path) -> None:
     channel = _make_channel(tmp_path)
     raw = json.dumps(
@@ -611,3 +625,85 @@ async def test_send_falls_back_to_plain_text_when_post_send_fails(monkeypatch, t
     text = str(payload["text"])
     assert "Delivery warning" in text
     assert "code=230099" in text
+
+
+def test_should_prefer_markdown_file_for_many_tables(tmp_path: Path) -> None:
+    channel = _make_channel(tmp_path)
+
+    prefer, content_len, table_count = channel._should_prefer_markdown_file(_markdown_tables(5))
+
+    assert prefer is True
+    assert content_len > 0
+    assert table_count == 5
+
+
+@pytest.mark.asyncio
+async def test_send_prefers_markdown_file_for_5_plus_tables(monkeypatch, tmp_path: Path) -> None:
+    channel = _make_channel(tmp_path)
+    called: dict[str, object] = {}
+
+    async def _fake_send_markdown_file_message(**kwargs):
+        called.update(kwargs)
+        return True, ""
+
+    monkeypatch.setattr(channel, "_send_markdown_file_message", _fake_send_markdown_file_message)
+    channel._client = object()
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content=_markdown_tables(5),
+        )
+    )
+
+    assert called["receive_id_type"] == "chat_id"
+    assert called["receive_id"] == "oc_group_1"
+    assert "Table 1" in str(called["content"])
+
+
+@pytest.mark.asyncio
+async def test_send_markdown_file_failure_falls_back_to_text_without_interactive(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def _fake_send_markdown_file_message(**kwargs):
+        return False, "upload failed"
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        return _SendResponse(True, code=0, msg="ok", log_id="log_text_4")
+
+    monkeypatch.setattr(channel, "_send_markdown_file_message", _fake_send_markdown_file_message)
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content=_markdown_tables(5),
+        )
+    )
+
+    assert len(calls) == 1
+    body = calls[0]["request_body"]
+    assert isinstance(body, dict)
+    assert body["msg_type"] == "text"
+    payload = json.loads(str(body["content"]))
+    text = str(payload["text"])
+    assert "Delivery warning" in text
+    assert "markdown file send failed" in text
+    assert "upload failed" in text

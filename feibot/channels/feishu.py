@@ -9,6 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from feibot.bus.events import OutboundMessage
@@ -63,6 +64,10 @@ MSG_TYPE_MAP = {
 MAX_QUOTED_PREVIEW_CHARS = 1200
 MAX_MERGE_FORWARD_PREVIEW_ITEMS = 6
 MAX_MERGE_FORWARD_LINE_CHARS = 240
+MARKDOWN_FILE_CHAR_THRESHOLD = 3200
+MARKDOWN_FILE_TABLE_THRESHOLD = 5
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
+_MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^[ \t]*\|(?:\s*:?-{3,}:?\s*\|)+[ \t]*$")
 
 
 class FeishuChannel(BaseChannel):
@@ -377,6 +382,82 @@ class FeishuChannel(BaseChannel):
         )
         return self._client.im.v1.message.create(request)
 
+    def _send_with_text_fallback(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        original_content: str,
+    ) -> None:
+        try:
+            response = self._send_message_sync(
+                receive_id_type=receive_id_type,
+                receive_id=receive_id,
+                msg_type=msg_type,
+                content=content,
+            )
+        except Exception as e:
+            logger.error(f"Error sending Feishu {msg_type} message: {e}")
+            if msg_type != "text":
+                self._send_text_fallback(
+                    receive_id_type=receive_id_type,
+                    receive_id=receive_id,
+                    original_content=original_content,
+                    reason=str(e),
+                )
+            return
+
+        if response.success():
+            logger.debug(f"Feishu {msg_type} message sent to {receive_id}")
+            return
+
+        log_id = self._response_log_id(response)
+        reason = f"code={response.code}, msg={response.msg}"
+        logger.error(
+            f"Failed to send Feishu {msg_type} message: code={response.code}, "
+            f"msg={response.msg}, log_id={log_id}"
+        )
+        if msg_type != "text":
+            self._send_text_fallback(
+                receive_id_type=receive_id_type,
+                receive_id=receive_id,
+                original_content=original_content,
+                reason=reason,
+            )
+
+    def _send_text_fallback(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        original_content: str,
+        reason: str,
+    ) -> None:
+        fallback_text = self._build_text_fallback_message(original_content, reason)
+        fallback_content = json.dumps({"text": fallback_text}, ensure_ascii=False)
+        try:
+            fallback_response = self._send_message_sync(
+                receive_id_type=receive_id_type,
+                receive_id=receive_id,
+                msg_type="text",
+                content=fallback_content,
+            )
+        except Exception as fallback_error:
+            logger.error(f"Error sending Feishu fallback text message: {fallback_error}")
+            return
+
+        if fallback_response.success():
+            logger.debug(f"Feishu text fallback sent to {receive_id}")
+            return
+
+        fallback_log_id = self._response_log_id(fallback_response)
+        logger.error(
+            "Failed to send Feishu fallback text message: "
+            f"code={fallback_response.code}, msg={fallback_response.msg}, log_id={fallback_log_id}"
+        )
+
     @staticmethod
     def _response_log_id(response: Any) -> str | None:
         getter = getattr(response, "get_log_id", None)
@@ -427,6 +508,154 @@ class FeishuChannel(BaseChannel):
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    @staticmethod
+    def _is_markdown_content(text: str) -> bool:
+        if not text:
+            return False
+        if "```" in text:
+            return True
+        if re.search(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+\S", text):
+            return True
+        if re.search(r"(?m)^[ \t]*([-*+]|\d+\.)[ \t]+\S", text):
+            return True
+        if re.search(r"\[[^\]]+\]\([^)]+\)", text):
+            return True
+        if _MARKDOWN_TABLE_SEPARATOR_RE.search(text):
+            return True
+        return False
+
+    @staticmethod
+    def _count_markdown_tables(text: str) -> int:
+        lines = text.splitlines()
+        count = 0
+        idx = 0
+        while idx + 1 < len(lines):
+            head = lines[idx]
+            sep = lines[idx + 1]
+            if _MARKDOWN_TABLE_ROW_RE.match(head or "") and _MARKDOWN_TABLE_SEPARATOR_RE.match(sep or ""):
+                count += 1
+                idx += 2
+                while idx < len(lines) and _MARKDOWN_TABLE_ROW_RE.match(lines[idx] or ""):
+                    idx += 1
+                continue
+            idx += 1
+        return count
+
+    @classmethod
+    def _should_prefer_markdown_file(cls, content: str) -> tuple[bool, int, int]:
+        text = str(content or "").strip()
+        if not text:
+            return False, 0, 0
+        if not cls._is_markdown_content(text):
+            return False, len(text), 0
+        table_count = cls._count_markdown_tables(text)
+        content_len = len(text)
+        prefer_file = (
+            content_len >= MARKDOWN_FILE_CHAR_THRESHOLD
+            or table_count >= MARKDOWN_FILE_TABLE_THRESHOLD
+        )
+        return prefer_file, content_len, table_count
+
+    def _build_outbound_markdown_path(self) -> Path:
+        if self._workspace_dir:
+            base = self._workspace_dir / "downloads" / "feishu" / "outbound"
+        else:
+            base = Path.home() / ".feibot" / "media" / "feishu" / "outbound"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"feibot-{uuid.uuid4().hex[:12]}.md"
+
+    @staticmethod
+    def _safe_http_json(resp: httpx.Response) -> dict[str, Any]:
+        try:
+            payload = resp.json()
+            return payload if isinstance(payload, dict) else {"raw": payload}
+        except Exception:
+            return {"raw_text": (resp.text or "").strip()}
+
+    async def _request_tenant_access_token(self, client: httpx.AsyncClient) -> str:
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        resp = await client.post(
+            url,
+            json={
+                "app_id": self.config.app_id,
+                "app_secret": self.config.app_secret,
+            },
+        )
+        payload = self._safe_http_json(resp)
+        token = str(payload.get("tenant_access_token") or "").strip()
+        if payload.get("code") != 0 or not token:
+            raise RuntimeError(
+                "token request failed: "
+                f"http={resp.status_code}, code={payload.get('code')}, msg={payload.get('msg')}"
+            )
+        return token
+
+    async def _upload_markdown_file(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        token: str,
+        markdown_path: Path,
+    ) -> str:
+        url = "https://open.feishu.cn/open-apis/im/v1/files"
+        with markdown_path.open("rb") as fp:
+            files = {"file": (markdown_path.name, fp, "text/markdown")}
+            data = {"file_type": "stream", "file_name": markdown_path.name}
+            resp = await client.post(
+                url,
+                data=data,
+                files=files,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        payload = self._safe_http_json(resp)
+        file_key = str((payload.get("data") or {}).get("file_key") or "").strip()
+        if payload.get("code") != 0 or not file_key:
+            raise RuntimeError(
+                "upload markdown failed: "
+                f"http={resp.status_code}, code={payload.get('code')}, msg={payload.get('msg')}"
+            )
+        return file_key
+
+    async def _send_markdown_file_message(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        content: str,
+    ) -> tuple[bool, str]:
+        if not self.config.app_id or not self.config.app_secret:
+            return False, "Feishu app credentials are missing"
+
+        markdown_path = self._build_outbound_markdown_path()
+        try:
+            markdown_path.write_text(str(content or "").strip() or "(empty)", encoding="utf-8")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                token = await self._request_tenant_access_token(client)
+                file_key = await self._upload_markdown_file(
+                    client,
+                    token=token,
+                    markdown_path=markdown_path,
+                )
+
+            file_content = json.dumps({"file_key": file_key}, ensure_ascii=False)
+            response = self._send_message_sync(
+                receive_id_type=receive_id_type,
+                receive_id=receive_id,
+                msg_type="file",
+                content=file_content,
+            )
+            if response.success():
+                return True, ""
+            log_id = self._response_log_id(response)
+            return False, f"code={response.code}, msg={response.msg}, log_id={log_id}"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            try:
+                markdown_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu."""
         if not self._client:
@@ -439,83 +668,78 @@ class FeishuChannel(BaseChannel):
             return
 
         receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
-        send_msg_type = "interactive"
-        
-        try:
-            metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
-            custom_card = metadata.get("_feishu_card")
-            if isinstance(custom_card, dict):
-                card = self._normalize_card_payload(custom_card)
-                content = json.dumps(card, ensure_ascii=False)
-            elif str(metadata.get("_feishu_msg_type") or "").strip().lower() == "post":
-                send_msg_type = "post"
-                content = self._build_post_message_content(msg.content)
-            elif str(metadata.get("_feishu_msg_type") or "").strip().lower() == "text":
-                send_msg_type = "text"
-                content = json.dumps({"text": str(msg.content or "")}, ensure_ascii=False)
-            else:
-                # Build a simple markdown card to avoid unsupported legacy tags on JSON 2.0.
-                elements = self._build_card_elements(msg.content)
-                card = self._normalize_card_payload({
-                    "config": {"width_mode": "fill", "update_multi": True},
-                    "body": {"elements": elements},
-                })
-                content = json.dumps(card, ensure_ascii=False)
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        custom_card = metadata.get("_feishu_card")
+        explicit_msg_type = str(metadata.get("_feishu_msg_type") or "").strip().lower()
 
-            response = self._send_message_sync(
+        if isinstance(custom_card, dict):
+            card = self._normalize_card_payload(custom_card)
+            self._send_with_text_fallback(
                 receive_id_type=receive_id_type,
                 receive_id=chat_id,
-                msg_type=send_msg_type,
-                content=content,
+                msg_type="interactive",
+                content=json.dumps(card, ensure_ascii=False),
+                original_content=msg.content,
             )
+            return
 
-            if not response.success():
-                log_id = self._response_log_id(response)
-                reason = f"code={response.code}, msg={response.msg}"
-                logger.error(
-                    f"Failed to send Feishu {send_msg_type} message: code={response.code}, "
-                    f"msg={response.msg}, log_id={log_id}"
-                )
-                if send_msg_type == "text":
-                    return
-                fallback_text = self._build_text_fallback_message(msg.content, reason)
-                fallback_content = json.dumps({"text": fallback_text}, ensure_ascii=False)
-                fallback_response = self._send_message_sync(
-                    receive_id_type=receive_id_type,
-                    receive_id=chat_id,
-                    msg_type="text",
-                    content=fallback_content,
-                )
-                if not fallback_response.success():
-                    fallback_log_id = self._response_log_id(fallback_response)
-                    logger.error(
-                        "Failed to send Feishu fallback text message: "
-                        f"code={fallback_response.code}, msg={fallback_response.msg}, log_id={fallback_log_id}"
-                    )
-            else:
-                logger.debug(f"Feishu {send_msg_type} message sent to {msg.chat_id}")
-                
-        except Exception as e:
-            logger.error(f"Error sending Feishu message: {e}")
-            try:
-                if send_msg_type == "text":
-                    return
-                fallback_text = self._build_text_fallback_message(msg.content, str(e))
-                fallback_content = json.dumps({"text": fallback_text}, ensure_ascii=False)
-                fallback_response = self._send_message_sync(
-                    receive_id_type=receive_id_type,
-                    receive_id=chat_id,
-                    msg_type="text",
-                    content=fallback_content,
-                )
-                if not fallback_response.success():
-                    fallback_log_id = self._response_log_id(fallback_response)
-                    logger.error(
-                        "Failed to send Feishu fallback text message after exception: "
-                        f"code={fallback_response.code}, msg={fallback_response.msg}, log_id={fallback_log_id}"
-                    )
-            except Exception as fallback_error:
-                logger.error(f"Error sending Feishu fallback text message: {fallback_error}")
+        if explicit_msg_type == "text":
+            self._send_with_text_fallback(
+                receive_id_type=receive_id_type,
+                receive_id=chat_id,
+                msg_type="text",
+                content=json.dumps({"text": str(msg.content or "")}, ensure_ascii=False),
+                original_content=msg.content,
+            )
+            return
+
+        if explicit_msg_type == "post":
+            self._send_with_text_fallback(
+                receive_id_type=receive_id_type,
+                receive_id=chat_id,
+                msg_type="post",
+                content=self._build_post_message_content(msg.content),
+                original_content=msg.content,
+            )
+            return
+
+        prefer_file, content_len, table_count = self._should_prefer_markdown_file(msg.content)
+        if prefer_file:
+            logger.info(
+                "Feishu outbound uses markdown-file mode: chars={}, tables={}",
+                content_len,
+                table_count,
+            )
+            file_ok, file_reason = await self._send_markdown_file_message(
+                receive_id_type=receive_id_type,
+                receive_id=chat_id,
+                content=msg.content,
+            )
+            if file_ok:
+                logger.debug(f"Feishu markdown file message sent to {msg.chat_id}")
+                return
+            logger.error(f"Failed to send Feishu markdown file message: {file_reason}")
+            self._send_text_fallback(
+                receive_id_type=receive_id_type,
+                receive_id=chat_id,
+                original_content=msg.content,
+                reason=f"markdown file send failed: {file_reason}",
+            )
+            return
+
+        # Build a simple markdown card to avoid unsupported legacy tags on JSON 2.0.
+        elements = self._build_card_elements(msg.content)
+        card = self._normalize_card_payload({
+            "config": {"width_mode": "fill", "update_multi": True},
+            "body": {"elements": elements},
+        })
+        self._send_with_text_fallback(
+            receive_id_type=receive_id_type,
+            receive_id=chat_id,
+            msg_type="interactive",
+            content=json.dumps(card, ensure_ascii=False),
+            original_content=msg.content,
+        )
     
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """
