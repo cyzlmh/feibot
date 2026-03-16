@@ -19,7 +19,8 @@ Use this skill immediately when the user asks any of:
 
 ## Quick start
 
-If you keep provider keys in a local env file, load it before `summarize`:
+When running via feibot `exec`, set provider env once in `config.json` under `skills.env`.
+If running manually outside feibot, you can still load a local env file:
 
 ```bash
 set -a

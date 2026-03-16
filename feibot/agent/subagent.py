@@ -35,6 +35,7 @@ class SubagentManager:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         brave_api_key: str | None = None,
+        skills_env: dict[str, str] | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         allowed_dirs: list[str] | None = None,
@@ -49,6 +50,11 @@ class SubagentManager:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.brave_api_key = brave_api_key
+        self.skills_env = {
+            str(k): str(v)
+            for k, v in (skills_env or {}).items()
+            if str(k).strip()
+        }
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.allowed_dirs = allowed_dirs or []
@@ -116,6 +122,7 @@ class SubagentManager:
                     timeout=self.exec_config.timeout,
                     restrict_to_workspace=self.restrict_to_workspace,
                     path_append=self.exec_config.path_append,
+                    injected_env=self.skills_env,
                 )
             )
             tools.register(WebSearchTool(api_key=self.brave_api_key))

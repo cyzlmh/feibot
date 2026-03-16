@@ -111,6 +111,7 @@ class AgentLoop:
         max_tokens: int = 4096,
         memory_window: int = 50,
         brave_api_key: str | None = None,
+        skills_env: dict[str, str] | None = None,
         exec_config: Any | None = None,
         feishu_config: Any | None = None,
         cron_service: Any | None = None,
@@ -133,6 +134,11 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
+        self.skills_env = {
+            str(k): str(v)
+            for k, v in (skills_env or {}).items()
+            if str(k).strip()
+        }
         self.exec_config = exec_config or ExecToolConfig()
         self.feishu_config = feishu_config
         self.cron_service = cron_service
@@ -157,6 +163,7 @@ class AgentLoop:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
+            skills_env=self.skills_env,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             agent_name=self.agent_name,
@@ -196,6 +203,7 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
             allowed_dirs=self.allowed_dirs,
             path_append=self.exec_config.path_append,
+            injected_env=self.skills_env,
             approval_manager=self.exec_approvals,
             approval_workflow_resolver=lambda risk_level, channel, _sender_id: self._approval_workflow(
                 channel,

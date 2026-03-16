@@ -136,6 +136,11 @@ class ToolsConfig(BaseModel):
     disabled_tools: list[str] = Field(default_factory=list)  # List of tool names to disable (e.g., ["feishu_doc", "feishu_wiki"])
 
 
+class SkillsConfig(BaseModel):
+    """Skill runtime environment configuration."""
+    env: dict[str, str] = Field(default_factory=dict)
+
+
 class PathsConfig(BaseModel):
     """Filesystem paths for runtime data."""
     workspace: str = Field(...)
@@ -151,6 +156,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
     def resolve_workspace_path(self, config_path: Path) -> Path:
         """Resolve workspace path relative to config file when needed."""

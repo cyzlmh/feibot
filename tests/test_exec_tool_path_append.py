@@ -21,3 +21,15 @@ async def test_exec_tool_path_append_allows_custom_binary(tmp_path: Path) -> Non
 
     result = await tool.execute("feibot-test-tool")
     assert "path_append_ok" in result
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_injected_env_is_available(tmp_path: Path) -> None:
+    tool = ExecTool(
+        timeout=5,
+        working_dir=str(tmp_path),
+        injected_env={"FEIBOT_SKILL_TEST_ENV": "hello-skill-env"},
+    )
+
+    result = await tool.execute("printf '%s' \"$FEIBOT_SKILL_TEST_ENV\"")
+    assert "hello-skill-env" in result

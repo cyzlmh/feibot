@@ -41,6 +41,7 @@ class ExecTool(Tool):
         restrict_to_workspace: bool = False,
         allowed_dirs: list[str] | None = None,
         path_append: str = "",
+        injected_env: dict[str, str] | None = None,
         approval_manager: ExecApprovalManager | None = None,
         approval_workflow_resolver: Callable[[RiskLevel, str, str], str] | None = None,
     ):
@@ -73,6 +74,11 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.allowed_dirs = [Path(d).expanduser().resolve() for d in (allowed_dirs or [])]
         self.path_append = path_append
+        self.injected_env = {
+            str(k): str(v)
+            for k, v in (injected_env or {}).items()
+            if str(k).strip()
+        }
         self.approval_manager = approval_manager
         self.approval_workflow_resolver = approval_workflow_resolver
         self._channel_ctx: ContextVar[str] = ContextVar("exec_default_channel", default="")
@@ -148,6 +154,8 @@ class ExecTool(Tool):
             return self._build_approval_pending_result(request.id)
 
         env = os.environ.copy()
+        if self.injected_env:
+            env.update(self.injected_env)
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 

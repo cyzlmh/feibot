@@ -25,10 +25,25 @@ def load_config(config_path: Path) -> Config:
     try:
         with open(path) as f:
             data = json.load(f)
+        skills_env = _extract_skills_env(data)
         data = _migrate_config(data)
-        return Config.model_validate(convert_keys(data))
+        normalized = convert_keys(data)
+        if skills_env is not None:
+            normalized.setdefault("skills", {})["env"] = skills_env
+        return Config.model_validate(normalized)
     except (json.JSONDecodeError, ValueError) as e:
         raise ValueError(f"Failed to parse config: {e}") from e
+
+
+def _extract_skills_env(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract skills.env map without key normalization."""
+    skills = data.get("skills")
+    if not isinstance(skills, dict):
+        return None
+    env = skills.get("env")
+    if not isinstance(env, dict):
+        return None
+    return {str(k): v for k, v in env.items() if str(k).strip()}
 
 
 def save_config(config: Config, config_path: Path) -> None:
