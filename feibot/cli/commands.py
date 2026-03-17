@@ -252,7 +252,7 @@ def gateway(
     from feibot.bus.queue import MessageBus
     from feibot.channels.manager import ChannelManager
     from feibot.cron.service import CronService
-    from feibot.cron.types import CronJob, CronSchedule
+    from feibot.cron.types import CronExecutionResult, CronJob, CronSchedule
     from feibot.heartbeat.service import HeartbeatService
     from feibot.history.service import HistorySyncService
     from feibot.session.manager import SessionManager
@@ -297,40 +297,166 @@ def gateway(
         agent_name=config.name,
     )
 
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        if job.payload.kind == "system_event":
-            if job.payload.message == "history_sync":
-                response = await history_sync.run()
-            else:
-                response = f"Unknown system event: {job.payload.message}"
-        else:
-            response = await agent.process_direct(
-                job.payload.message,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
-                metadata={"_suppress_progress": True},
+    def _parse_cron_result(response: str | None) -> CronExecutionResult:
+        """Parse structured cron output, with resilient text fallback."""
+        text = str(response or "").strip()
+        if not text:
+            return CronExecutionResult(
+                run_status="ok",
+                business_status="no_change",
+                delivery_status="not_requested",
+                summary=None,
+                user_message="",
             )
+
+        parsed: dict | None = None
+        try:
+            candidate = json.loads(text)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except Exception:
+            codeblock = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+            if codeblock:
+                try:
+                    candidate = json.loads(codeblock.group(1))
+                    if isinstance(candidate, dict):
+                        parsed = candidate
+                except Exception:
+                    parsed = None
+
+        if parsed is not None:
+            run_status = str(parsed.get("run_status") or parsed.get("runStatus") or "ok").strip().lower()
+            if run_status not in {"ok", "error", "skipped"}:
+                run_status = "ok"
+            business_status = str(
+                parsed.get("business_status") or parsed.get("businessStatus") or "n_a"
+            ).strip().lower()
+            if business_status not in {"changed", "no_change", "error", "n_a"}:
+                business_status = "n_a"
+            summary = str(parsed.get("summary") or "").strip() or None
+            user_message = str(
+                parsed.get("user_message")
+                or parsed.get("userMessage")
+                or parsed.get("message")
+                or ""
+            ).strip()
+            if not user_message:
+                user_message = text
+            fingerprint = str(parsed.get("fingerprint") or "").strip() or None
+            error = str(parsed.get("error") or "").strip() or None
+            return CronExecutionResult(
+                run_status=run_status,
+                business_status=business_status,
+                delivery_status="not_requested",
+                summary=summary,
+                user_message=user_message,
+                fingerprint=fingerprint,
+                error=error,
+            )
+
+        lower_text = text.lower()
+        no_change_markers = (
+            "no new post",
+            "no new posts",
+            "no updates",
+            "nothing new",
+            "unchanged",
+        )
+        business_status = "no_change" if any(m in lower_text for m in no_change_markers) else "changed"
+        summary = text.splitlines()[0].strip()[:280] if text else None
+        return CronExecutionResult(
+            run_status="ok",
+            business_status=business_status,
+            delivery_status="not_requested",
+            summary=summary,
+            user_message=text,
+        )
+
+    def _should_notify(job: CronJob, result: CronExecutionResult) -> bool:
+        if result.run_status == "error":
+            return bool(job.payload.notify_on_error)
+        if job.payload.notify_policy == "always":
+            return True
+        if job.payload.notify_policy == "changes_only":
+            return result.business_status == "changed"
+        if job.payload.notify_policy == "digest":
+            return result.business_status == "changed"
+        return False
+
+    async def on_cron_job(job: CronJob) -> CronExecutionResult:
+        """Execute one cron job and return structured execution/delivery result."""
+        try:
+            if job.payload.kind == "system_event":
+                if job.payload.message == "history_sync":
+                    response = await history_sync.run()
+                else:
+                    response = f"Unknown system event: {job.payload.message}"
+            else:
+                response = await agent.process_direct(
+                    job.payload.message,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                    metadata={"_suppress_progress": True},
+                )
+            result = _parse_cron_result(response)
+        except Exception as e:
+            result = CronExecutionResult(
+                run_status="error",
+                business_status="error",
+                delivery_status="not_requested",
+                error=str(e),
+                summary=f"Cron job '{job.name}' failed",
+            )
+
+        notify = _should_notify(job, result)
+        if result.run_status == "error" and not result.user_message:
+            result.user_message = (
+                f"Cron job '{job.name}' failed: {result.error or 'unknown error'}"
+            )
+
+        if not notify:
+            result.delivery_status = "not_requested"
+            return result
+
         deliver_channel = job.payload.channel
         deliver_to = job.payload.to
-        if job.payload.deliver and not deliver_to:
+        if not deliver_to:
             fallback_channel, fallback_chat_id = _pick_heartbeat_target()
             if fallback_channel != "cli":
                 deliver_channel = deliver_channel or fallback_channel
                 deliver_to = fallback_chat_id
 
-        if job.payload.deliver and deliver_to and response and response.strip():
-            from feibot.bus.events import OutboundMessage
+        content = str(result.user_message or result.summary or "").strip()
+        if result.run_status == "error" and not content:
+            content = f"Cron job '{job.name}' failed."
 
+        if not deliver_to:
+            result.delivery_status = "not_delivered"
+            result.delivery_error = "No delivery target available"
+            return result
+
+        if not content:
+            result.delivery_status = "not_requested"
+            return result
+
+        from feibot.bus.events import OutboundMessage
+
+        try:
             await bus.publish_outbound(
                 OutboundMessage(
                     channel=deliver_channel or "cli",
                     chat_id=deliver_to,
-                    content=response or "",
+                    content=content,
                 )
             )
-        return response
+            # Outbound dispatch is asynchronous; enqueue success means status is unknown.
+            result.delivery_status = "unknown"
+            result.delivery_error = None
+        except Exception as e:
+            result.delivery_status = "not_delivered"
+            result.delivery_error = str(e)
+        return result
 
     cron.on_job = on_cron_job
 
@@ -631,7 +757,10 @@ def cron_list(
     table.add_column("ID", style="cyan")
     table.add_column("Name")
     table.add_column("Schedule")
-    table.add_column("Status")
+    table.add_column("Enabled")
+    table.add_column("Run")
+    table.add_column("Business")
+    table.add_column("Delivery")
     table.add_column("Next Run")
 
     for job in jobs:
@@ -655,8 +784,20 @@ def cron_list(
             except Exception:
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
-        status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
-        table.add_row(job.id, job.name, sched, status, next_run)
+        enabled = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
+        run_status = job.state.run_status or "-"
+        business_status = job.state.business_status or "-"
+        delivery_status = job.state.delivery_status or "-"
+        table.add_row(
+            job.id,
+            job.name,
+            sched,
+            enabled,
+            run_status,
+            business_status,
+            delivery_status,
+            next_run,
+        )
 
     console.print(table)
 
@@ -669,7 +810,16 @@ def cron_add(
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
     tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"),
     at: str = typer.Option(None, "--at", help="Run once at time (ISO format)"),
-    deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
+    notify_policy: str = typer.Option(
+        "changes_only",
+        "--notify-policy",
+        help="Notification policy: always|changes_only|digest",
+    ),
+    notify_on_error: bool = typer.Option(
+        True,
+        "--notify-on-error/--no-notify-on-error",
+        help="Whether to notify on execution errors",
+    ),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
     channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'feishu')"),
 ):
@@ -687,7 +837,12 @@ def cron_add(
         console.print("[red]Error: --channel only supports 'feishu'[/red]")
         raise typer.Exit(1)
 
-    if deliver and to and not channel:
+    policy = str(notify_policy or "").strip().lower()
+    if policy not in {"always", "changes_only", "digest"}:
+        console.print("[red]Error: --notify-policy must be always|changes_only|digest[/red]")
+        raise typer.Exit(1)
+
+    if to and not channel:
         channel = "feishu"
 
     if every:
@@ -714,7 +869,8 @@ def cron_add(
             name=name,
             schedule=schedule,
             message=message,
-            deliver=deliver,
+            notify_policy=policy,
+            notify_on_error=notify_on_error,
             to=to,
             channel=channel,
             delete_after_run=(schedule.kind == "at"),
@@ -729,6 +885,50 @@ def cron_add(
         console.print(f"[yellow]✓[/yellow] Updated job '{job.name}' ({job.id})")
     else:
         console.print(f"[cyan]✓[/cyan] Job unchanged '{job.name}' ({job.id})")
+
+
+@cron_app.command("runs")
+def cron_runs(
+    job_id: str = typer.Argument(..., help="Job ID"),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, max=200, help="Number of recent runs"),
+):
+    """Show recent run telemetry for one job."""
+    from datetime import datetime as _dt
+
+    from feibot.cron.service import CronService
+
+    _, _, workspace, _ = _load_runtime_config()
+    store_path = workspace / "cron" / "jobs.json"
+    service = CronService(store_path)
+    entries = service.list_runs(job_id, limit=limit)
+    if not entries:
+        console.print(f"No run logs for job {job_id}.")
+        return
+
+    table = Table(title=f"Cron Runs ({job_id})")
+    table.add_column("Time")
+    table.add_column("Run")
+    table.add_column("Business")
+    table.add_column("Delivery")
+    table.add_column("Summary/Error")
+
+    for entry in entries:
+        ts = entry.get("ts")
+        when = (
+            _dt.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(ts, (int, float))
+            else "-"
+        )
+        summary_or_error = str(entry.get("summary") or entry.get("error") or "-")
+        table.add_row(
+            when,
+            str(entry.get("runStatus") or "-"),
+            str(entry.get("businessStatus") or "-"),
+            str(entry.get("deliveryStatus") or "-"),
+            summary_or_error[:1000],
+        )
+
+    console.print(table)
 
 
 @cron_app.command("remove")
@@ -779,7 +979,7 @@ def cron_run(
     from feibot.agent.loop import AgentLoop
     from feibot.bus.queue import MessageBus
     from feibot.cron.service import CronService
-    from feibot.cron.types import CronJob
+    from feibot.cron.types import CronExecutionResult, CronJob
     from feibot.history.service import HistorySyncService
     from feibot.session.manager import SessionManager
 
@@ -818,9 +1018,9 @@ def cron_run(
         model=config.agents.defaults.model,
     )
 
-    result_holder: list[str | None] = []
+    result_holder: list[CronExecutionResult] = []
 
-    async def on_job(job: CronJob) -> str | None:
+    async def on_job(job: CronJob) -> CronExecutionResult:
         if job.payload.kind == "system_event":
             if job.payload.message == "history_sync":
                 response = await history_sync.run()
@@ -834,8 +1034,16 @@ def cron_run(
                 chat_id=job.payload.to or "direct",
                 metadata={"_suppress_progress": True},
             )
-        result_holder.append(response)
-        return response
+        text = str(response or "").strip()
+        run_result = CronExecutionResult(
+            run_status="ok",
+            business_status="changed" if text else "no_change",
+            delivery_status="not_requested",
+            summary=(text.splitlines()[0].strip()[:280] if text else None),
+            user_message=text,
+        )
+        result_holder.append(run_result)
+        return run_result
 
     service.on_job = on_job
 
@@ -844,8 +1052,8 @@ def cron_run(
 
     if asyncio.run(run_job()):
         console.print("[green]✓[/green] Job executed")
-        if result_holder and result_holder[0]:
-            _print_agent_response(result_holder[0], render_markdown=True)
+        if result_holder and result_holder[0].user_message:
+            _print_agent_response(result_holder[0].user_message or "", render_markdown=True)
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
 

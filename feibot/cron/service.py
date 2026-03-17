@@ -10,7 +10,14 @@ from typing import Any, Callable, Coroutine, Literal
 
 from loguru import logger
 
-from feibot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
+from feibot.cron.types import (
+    CronExecutionResult,
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronSchedule,
+    CronStore,
+)
 
 
 def _now_ms() -> int:
@@ -25,7 +32,6 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     if schedule.kind == "every":
         if not schedule.every_ms or schedule.every_ms <= 0:
             return None
-        # Next interval from now
         return now_ms + schedule.every_ms
 
     if schedule.kind == "cron" and schedule.expr:
@@ -34,7 +40,6 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
 
             from croniter import croniter
 
-            # Use caller-provided reference time for deterministic scheduling
             base_time = now_ms / 1000
             tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
@@ -76,13 +81,51 @@ def _schedule_equals(a: CronSchedule, b: CronSchedule) -> bool:
     )
 
 
+def _normalize_notify_policy(value: str | None) -> Literal["always", "changes_only", "digest"]:
+    raw = str(value or "").strip().lower()
+    if raw in {"always", "changes_only", "digest"}:
+        return raw
+    return "changes_only"
+
+
+def _normalize_run_status(value: str | None) -> Literal["ok", "error", "skipped"] | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"ok", "error", "skipped"}:
+        return raw
+    return None
+
+
+def _normalize_business_status(value: str | None) -> Literal["changed", "no_change", "error", "n_a"] | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"changed", "no_change", "error", "n_a"}:
+        return raw
+    return None
+
+
+def _normalize_delivery_status(
+    value: str | None,
+) -> Literal["delivered", "not_delivered", "not_requested", "unknown"] | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"delivered", "not_delivered", "not_requested", "unknown"}:
+        return raw
+    return None
+
+
+def _as_non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        on_job: Callable[[CronJob], Coroutine[Any, Any, CronExecutionResult]] | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job
@@ -90,6 +133,10 @@ class CronService:
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running = False
+
+    @property
+    def _runs_dir(self) -> Path:
+        return self.store_path.parent / "runs"
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -106,6 +153,11 @@ class CronService:
                 data = json.loads(self.store_path.read_text(encoding="utf-8"))
                 jobs = []
                 for j in data.get("jobs", []):
+                    payload = j.get("payload", {})
+                    state = j.get("state", {})
+                    notify_policy = _normalize_notify_policy(payload.get("notifyPolicy"))
+                    if "notifyPolicy" not in payload and bool(payload.get("deliver", False)):
+                        notify_policy = "always"
                     jobs.append(
                         CronJob(
                             id=j["id"],
@@ -119,17 +171,25 @@ class CronService:
                                 tz=j["schedule"].get("tz"),
                             ),
                             payload=CronPayload(
-                                kind=j["payload"].get("kind", "agent_turn"),
-                                message=j["payload"].get("message", ""),
-                                deliver=j["payload"].get("deliver", False),
-                                channel=j["payload"].get("channel"),
-                                to=j["payload"].get("to"),
+                                kind=payload.get("kind", "agent_turn"),
+                                message=payload.get("message", ""),
+                                notify_policy=notify_policy,
+                                notify_on_error=bool(payload.get("notifyOnError", True)),
+                                channel=payload.get("channel"),
+                                to=payload.get("to"),
                             ),
                             state=CronJobState(
-                                next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
-                                last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
-                                last_status=j.get("state", {}).get("lastStatus"),
-                                last_error=j.get("state", {}).get("lastError"),
+                                running_at_ms=state.get("runningAtMs"),
+                                next_run_at_ms=state.get("nextRunAtMs"),
+                                last_run_at_ms=state.get("lastRunAtMs"),
+                                last_duration_ms=state.get("lastDurationMs"),
+                                run_status=_normalize_run_status(state.get("runStatus") or state.get("lastStatus")),
+                                business_status=_normalize_business_status(state.get("businessStatus")),
+                                delivery_status=_normalize_delivery_status(state.get("deliveryStatus")),
+                                last_error=state.get("lastError"),
+                                last_delivery_error=state.get("lastDeliveryError"),
+                                last_fingerprint=state.get("lastFingerprint"),
+                                consecutive_errors=_as_non_negative_int(state.get("consecutiveErrors"), 0),
                             ),
                             created_at_ms=j.get("createdAtMs", 0),
                             updated_at_ms=j.get("updatedAtMs", 0),
@@ -169,15 +229,23 @@ class CronService:
                     "payload": {
                         "kind": j.payload.kind,
                         "message": j.payload.message,
-                        "deliver": j.payload.deliver,
+                        "notifyPolicy": j.payload.notify_policy,
+                        "notifyOnError": j.payload.notify_on_error,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
                     },
                     "state": {
+                        "runningAtMs": j.state.running_at_ms,
                         "nextRunAtMs": j.state.next_run_at_ms,
                         "lastRunAtMs": j.state.last_run_at_ms,
-                        "lastStatus": j.state.last_status,
+                        "lastDurationMs": j.state.last_duration_ms,
+                        "runStatus": j.state.run_status,
+                        "businessStatus": j.state.business_status,
+                        "deliveryStatus": j.state.delivery_status,
                         "lastError": j.state.last_error,
+                        "lastDeliveryError": j.state.last_delivery_error,
+                        "lastFingerprint": j.state.last_fingerprint,
+                        "consecutiveErrors": j.state.consecutive_errors,
                     },
                     "createdAtMs": j.created_at_ms,
                     "updatedAtMs": j.updated_at_ms,
@@ -189,6 +257,34 @@ class CronService:
 
         self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         self._last_mtime = self.store_path.stat().st_mtime
+
+    def _append_run_log(
+        self,
+        *,
+        job: CronJob,
+        result: CronExecutionResult,
+        start_ms: int,
+        end_ms: int,
+    ) -> None:
+        entry = {
+            "ts": end_ms,
+            "jobId": job.id,
+            "action": "finished",
+            "runStatus": result.run_status,
+            "businessStatus": result.business_status,
+            "deliveryStatus": result.delivery_status,
+            "error": result.error,
+            "deliveryError": result.delivery_error,
+            "summary": result.summary,
+            "fingerprint": result.fingerprint,
+            "runAtMs": start_ms,
+            "durationMs": max(0, end_ms - start_ms),
+            "nextRunAtMs": job.state.next_run_at_ms,
+        }
+        path = self._runs_dir / f"{job.id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     async def start(self) -> None:
         """Start the cron service."""
@@ -219,11 +315,7 @@ class CronService:
         """Get the earliest next run time across all jobs."""
         if not self._store:
             return None
-        times = [
-            j.state.next_run_at_ms
-            for j in self._store.jobs
-            if j.enabled and j.state.next_run_at_ms
-        ]
+        times = [j.state.next_run_at_ms for j in self._store.jobs if j.enabled and j.state.next_run_at_ms]
         return min(times) if times else None
 
     def _arm_timer(self) -> None:
@@ -247,7 +339,6 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
-        # Pick up external CLI/file changes before deciding due jobs.
         self._load_store()
         if not self._store:
             return
@@ -268,25 +359,49 @@ class CronService:
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
+        job.state.running_at_ms = start_ms
+        job.state.last_error = None
+        job.state.last_delivery_error = None
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
+        result: CronExecutionResult
         try:
             if self.on_job:
-                await self.on_job(job)
-
-            job.state.last_status = "ok"
-            job.state.last_error = None
-            logger.info("Cron: job '{}' completed", job.name)
-
+                result = await self.on_job(job)
+                if not isinstance(result, CronExecutionResult):
+                    raise TypeError("cron callback must return CronExecutionResult")
+            else:
+                result = CronExecutionResult(
+                    run_status="skipped",
+                    business_status="n_a",
+                    delivery_status="not_requested",
+                    summary="No cron execution callback configured.",
+                )
         except Exception as e:
-            job.state.last_status = "error"
-            job.state.last_error = str(e)
             logger.error("Cron: job '{}' failed: {}", job.name, e)
+            result = CronExecutionResult(
+                run_status="error",
+                business_status="error",
+                delivery_status="not_requested",
+                error=str(e),
+            )
 
+        end_ms = _now_ms()
+        job.state.running_at_ms = None
         job.state.last_run_at_ms = start_ms
-        job.updated_at_ms = _now_ms()
+        job.state.last_duration_ms = max(0, end_ms - start_ms)
+        job.state.run_status = result.run_status
+        job.state.business_status = result.business_status
+        job.state.delivery_status = result.delivery_status
+        job.state.last_error = result.error
+        job.state.last_delivery_error = result.delivery_error
+        job.state.last_fingerprint = result.fingerprint
+        if result.run_status == "error":
+            job.state.consecutive_errors = max(0, job.state.consecutive_errors) + 1
+        else:
+            job.state.consecutive_errors = 0
+        job.updated_at_ms = end_ms
 
-        # Handle one-shot jobs
         if job.schedule.kind == "at":
             if job.delete_after_run:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
@@ -294,8 +409,9 @@ class CronService:
                 job.enabled = False
                 job.state.next_run_at_ms = None
         else:
-            # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, end_ms)
+
+        self._append_run_log(job=job, result=result, start_ms=start_ms, end_ms=end_ms)
 
     # ========== Public API ==========
 
@@ -304,6 +420,25 @@ class CronService:
         store = self._load_store()
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float("inf"))
+
+    def list_runs(self, job_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """List recent run log entries for one job (newest first)."""
+        path = self._runs_dir / f"{job_id}.jsonl"
+        if not path.exists():
+            return []
+        lines = path.read_text(encoding="utf-8").splitlines()
+        out: list[dict[str, Any]] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+            if len(out) >= max(1, limit):
+                break
+        return out
 
     @staticmethod
     def _identity_key(
@@ -326,7 +461,8 @@ class CronService:
         schedule: CronSchedule,
         message: str,
         payload_kind: Literal["system_event", "agent_turn"] = "agent_turn",
-        deliver: bool = False,
+        notify_policy: Literal["always", "changes_only", "digest"] = "changes_only",
+        notify_on_error: bool = True,
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
@@ -341,6 +477,7 @@ class CronService:
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
+        notify_policy = _normalize_notify_policy(notify_policy)
 
         target_identity = self._identity_key(
             kind=payload_kind,
@@ -377,7 +514,8 @@ class CronService:
             needs_update = (
                 not keep.enabled
                 or keep.name != name
-                or keep.payload.deliver != deliver
+                or keep.payload.notify_policy != notify_policy
+                or keep.payload.notify_on_error != notify_on_error
                 or keep.payload.channel != channel
                 or keep.payload.to != to
                 or keep.delete_after_run != delete_after_run
@@ -391,7 +529,8 @@ class CronService:
                 keep.payload = CronPayload(
                     kind=payload_kind,
                     message=message,
-                    deliver=deliver,
+                    notify_policy=notify_policy,
+                    notify_on_error=notify_on_error,
                     channel=channel,
                     to=to,
                 )
@@ -417,7 +556,8 @@ class CronService:
             payload=CronPayload(
                 kind=payload_kind,
                 message=message,
-                deliver=deliver,
+                notify_policy=notify_policy,
+                notify_on_error=notify_on_error,
                 channel=channel,
                 to=to,
             ),
@@ -477,8 +617,10 @@ class CronService:
     def status(self) -> dict:
         """Get service status."""
         store = self._load_store()
+        running_count = sum(1 for j in store.jobs if j.state.running_at_ms)
         return {
             "enabled": self._running,
             "jobs": len(store.jobs),
+            "running_jobs": running_count,
             "next_wake_at_ms": self._get_next_wake_ms(),
         }

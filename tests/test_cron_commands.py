@@ -85,7 +85,7 @@ def test_cron_add_creates_job_file(tmp_path) -> None:
     assert any(job["name"] == "demo" for job in payload["jobs"])
 
 
-def test_cron_add_deliver_defaults_to_feishu_channel(tmp_path) -> None:
+def test_cron_add_notify_policy_defaults_to_feishu_channel(tmp_path) -> None:
     config_path = _write_config(tmp_path)
 
     result = runner.invoke(
@@ -101,7 +101,8 @@ def test_cron_add_deliver_defaults_to_feishu_channel(tmp_path) -> None:
             "hello",
             "--every",
             "60",
-            "--deliver",
+            "--notify-policy",
+            "always",
             "--to",
             "oc_test_chat",
         ],
@@ -113,9 +114,10 @@ def test_cron_add_deliver_defaults_to_feishu_channel(tmp_path) -> None:
     job = next(job for job in payload["jobs"] if job["name"] == "deliver-demo")
     assert job["payload"]["channel"] == "feishu"
     assert job["payload"]["to"] == "oc_test_chat"
+    assert job["payload"]["notifyPolicy"] == "always"
 
 
-def test_cron_add_deliver_can_use_runtime_default_target(tmp_path) -> None:
+def test_cron_add_default_policy_can_use_runtime_default_target(tmp_path) -> None:
     config_path = _write_config(tmp_path)
 
     result = runner.invoke(
@@ -131,7 +133,6 @@ def test_cron_add_deliver_can_use_runtime_default_target(tmp_path) -> None:
             "hello",
             "--every",
             "60",
-            "--deliver",
         ],
     )
 
@@ -139,7 +140,7 @@ def test_cron_add_deliver_can_use_runtime_default_target(tmp_path) -> None:
     jobs_path = tmp_path / "workspace" / "cron" / "jobs.json"
     payload = json.loads(jobs_path.read_text(encoding="utf-8"))
     job = next(job for job in payload["jobs"] if job["name"] == "deliver-missing")
-    assert job["payload"]["deliver"] is True
+    assert job["payload"]["notifyPolicy"] == "changes_only"
     assert job["payload"]["channel"] is None
     assert job["payload"]["to"] is None
 

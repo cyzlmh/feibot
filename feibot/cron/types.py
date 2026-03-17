@@ -25,8 +25,9 @@ class CronPayload:
 
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
-    # Deliver response to channel
-    deliver: bool = False
+    # Delivery policy for user-facing notifications
+    notify_policy: Literal["always", "changes_only", "digest"] = "changes_only"
+    notify_on_error: bool = True
     channel: str | None = None  # e.g. "feishu"
     to: str | None = None  # e.g. Feishu chat_id
 
@@ -35,10 +36,31 @@ class CronPayload:
 class CronJobState:
     """Runtime state of a job."""
 
+    running_at_ms: int | None = None
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
-    last_status: Literal["ok", "error", "skipped"] | None = None
+    last_duration_ms: int | None = None
+    run_status: Literal["ok", "error", "skipped"] | None = None
+    business_status: Literal["changed", "no_change", "error", "n_a"] | None = None
+    delivery_status: Literal["delivered", "not_delivered", "not_requested", "unknown"] | None = None
     last_error: str | None = None
+    last_delivery_error: str | None = None
+    last_fingerprint: str | None = None
+    consecutive_errors: int = 0
+
+
+@dataclass
+class CronExecutionResult:
+    """Structured result returned by cron execution callback."""
+
+    run_status: Literal["ok", "error", "skipped"] = "ok"
+    business_status: Literal["changed", "no_change", "error", "n_a"] = "n_a"
+    delivery_status: Literal["delivered", "not_delivered", "not_requested", "unknown"] = "not_requested"
+    summary: str | None = None
+    user_message: str | None = None
+    fingerprint: str | None = None
+    error: str | None = None
+    delivery_error: str | None = None
 
 
 @dataclass

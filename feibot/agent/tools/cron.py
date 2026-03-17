@@ -127,7 +127,8 @@ class CronTool(Tool):
             name=message[:50],  # Increased from 30 to 50 chars
             schedule=schedule,
             message=message,
-            deliver=True,
+            notify_policy="changes_only",
+            notify_on_error=True,
             channel=channel,
             to=chat_id,
             delete_after_run=delete_after,
