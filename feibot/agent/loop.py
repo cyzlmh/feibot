@@ -107,6 +107,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 20,
+        max_consecutive_tool_errors: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         memory_window: int = 50,
@@ -130,6 +131,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
+        self.max_consecutive_tool_errors = max_consecutive_tool_errors
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
@@ -1574,7 +1576,7 @@ class AgentLoop:
                         loop_meta = _build_loop_meta("spawn_finish")
                         return final_content, tools_used, loop_meta
 
-                    if consecutive_tool_errors >= 3:
+                    if consecutive_tool_errors >= self.max_consecutive_tool_errors:
                         final_content = self._build_incomplete_response(
                             reason="too many consecutive tool errors",
                             user_goal=user_goal,

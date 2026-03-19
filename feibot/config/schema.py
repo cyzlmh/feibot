@@ -55,6 +55,7 @@ class AgentDefaults(BaseModel):
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
+    max_consecutive_tool_errors: int = 3
     memory_window: int = 50
     llm_policy: LLMCallPolicyConfig = Field(default_factory=LLMCallPolicyConfig)
 
