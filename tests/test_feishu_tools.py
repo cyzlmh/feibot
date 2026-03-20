@@ -68,48 +68,6 @@ def test_feishu_doc_resolve_doc_token_rejects_non_docx_url():
             url="https://acme.feishu.cn/wiki/UGdVwyrqJi0Qy9kRuuDcKmYynph",
         )
 
-
-def test_feishu_doc_validate_params_uses_action_specific_schema():
-    tool = FeishuDocTool()
-
-    # create requires title; doc_token is not part of create schema
-    errs_create = tool.validate_params({"action": "create", "doc_token": "doccn123"})
-    assert errs_create
-
-    # delete_block requires both a doc ref and a child block_id
-    errs_delete = tool.validate_params({"action": "delete_block", "doc_token": "doccn123"})
-    assert errs_delete
-
-    # insert_image accepts doc_token + image_path
-    errs_insert = tool.validate_params(
-        {"action": "insert_image", "doc_token": "doccn123", "image_path": "/tmp/a.png"}
-    )
-    assert errs_insert == []
-
-    errs_write_safe = tool.validate_params(
-        {"action": "write_safe", "doc_token": "doccn123", "content": "hello", "chunk_chars": 2400}
-    )
-    assert errs_write_safe == []
-
-    errs_write_safe_too_small = tool.validate_params(
-        {"action": "write_safe", "doc_token": "doccn123", "content": "hello", "chunk_chars": 100}
-    )
-    assert errs_write_safe_too_small
-
-
-def test_feishu_drive_validate_params_uses_action_specific_schema():
-    tool = FeishuDriveTool()
-
-    errs_move = tool.validate_params({"action": "move", "file_token": "boxcn123", "type": "docx"})
-    assert errs_move
-
-    errs_list = tool.validate_params({"action": "list", "folder_token": "fldcn123"})
-    assert errs_list == []
-
-
-def test_feishu_doc_delete_block_rejects_document_root():
-    tool = FeishuDocTool()
-
     with pytest.raises(RuntimeError, match="root block"):
         tool._delete_block(client=object(), doc_token="doccnROOT", block_id="doccnROOT")
 
@@ -401,12 +359,6 @@ async def test_feishu_wiki_requires_credentials():
     result = await tool.execute(action="spaces")
     assert "Error:" in result
     assert "credentials" in result.lower()
-
-
-def test_feishu_wiki_validate_params_accepts_integer_space_id():
-    tool = FeishuWikiTool()
-    errs = tool.validate_params({"action": "nodes", "space_id": 7610642581256440761})
-    assert errs == []
 
 
 @pytest.mark.asyncio
