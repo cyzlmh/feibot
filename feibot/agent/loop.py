@@ -20,14 +20,7 @@ from feibot.agent.exec_approval import (
 from feibot.agent.memory import MemoryStore
 from feibot.agent.subagent import SubagentManager
 from feibot.agent.tools.cron import CronTool
-from feibot.agent.tools.feishu import (
-    FeishuAppScopesTool,
-    FeishuDocTool,
-    FeishuDriveTool,
-    FeishuPermTool,
-    FeishuSendFileTool,
-    FeishuWikiTool,
-)
+from feibot.agent.tools.feishu import FeishuSendFileTool
 from feibot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from feibot.agent.tools.message import MessageTool
 from feibot.agent.tools.registry import ToolRegistry
@@ -247,44 +240,6 @@ class AgentLoop:
                 default_receive_id=default_receive_id,
                 default_receive_id_type="open_id",
                 allowed_dir=allowed_dir,
-            )
-        )
-        self.tools.register(
-            FeishuDocTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-                owner_open_id=default_receive_id,
-                wiki_space_id=getattr(fs_cfg, "wiki_space_id", "") if fs_cfg else "",
-                wiki_parent_node_token=getattr(fs_cfg, "wiki_parent_node_token", "") if fs_cfg else "",
-                auto_chunk_threshold_chars=(
-                    int(getattr(fs_cfg, "doc_write_auto_chunk_threshold_chars", 6000) or 0)
-                    if fs_cfg
-                    else 6000
-                ),
-            )
-        )
-        self.tools.register(
-            FeishuWikiTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuDriveTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuAppScopesTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-            )
-        )
-        self.tools.register(
-            FeishuPermTool(
-                app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
             )
         )
 
@@ -1127,11 +1082,6 @@ class AgentLoop:
             "list_dir": ["path"],
             "web_fetch": ["url"],
             "feishu_send_file": ["note", "file_path", "receive_id"],
-            "feishu_doc": ["action", "doc_token", "url"],
-            "feishu_wiki": ["action", "space_id", "token", "url", "node_token"],
-            "feishu_drive": ["action", "folder_token", "file_token", "name", "type"],
-            "feishu_app_scopes": [],
-            "feishu_perm": ["action", "type", "token", "member_type", "member_id"],
         }
         default_preferred_keys = [
             "path",
