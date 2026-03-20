@@ -79,6 +79,31 @@ class ReplaySensitiveProvider(LLMProvider):
         return "dummy/test-model"
 
 
+class DenyThenContinueProvider(LLMProvider):
+    def __init__(self, command: str):
+        super().__init__()
+        self.command = command
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_exec_deny_1",
+                        name="exec",
+                        arguments={"command": self.command},
+                    )
+                ],
+            )
+        return LLMResponse(content="fresh turn works")
+
+    def get_default_model(self) -> str:
+        return "dummy/test-model"
+
+
 @pytest.mark.asyncio
 async def test_exec_approval_pending_then_approve_resumes_blocked_loop(tmp_path: Path) -> None:
     bus = MessageBus()
@@ -412,6 +437,7 @@ async def test_exec_approval_card_deny_stops_loop(tmp_path: Path) -> None:
     assert provider.calls == 1
 
     session = loop.sessions.get_or_create("feishu:oc_group_1")
+    assert AgentLoop.RESUME_STATE_METADATA_KEY not in session.metadata
     history = session.get_history(max_messages=50)
     assert any(
         m.get("role") == "tool" and "exec approval denied" in str(m.get("content", ""))
@@ -566,3 +592,89 @@ async def test_exec_approval_dangerous_threshold_uses_feishu_card(tmp_path: Path
     approval_id = str(card_prompt.metadata.get("_exec_approval_id") or "")
     assert approval_id
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_card_deny_in_run_loop_does_not_hang_and_allows_new_turn(
+    tmp_path: Path,
+) -> None:
+    bus = MessageBus()
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    target = workspace / "cleanup_run_deny.txt"
+    target.write_text("trash", encoding="utf-8")
+    command = f"rm -f {target}"
+
+    provider = DenyThenContinueProvider(command)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        model="dummy/test-model",
+        max_iterations=5,
+        memory_window=20,
+        restrict_to_workspace=True,
+        exec_config=ExecToolConfig(approval_risk_level="confirm"),
+    )
+
+    runner = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_requester",
+                chat_id="oc_group_1",
+                content="delete temp file",
+                metadata={
+                    "msg_type": "text",
+                    "message_id": "om_exec_run_deny_1",
+                    "_suppress_progress": True,
+                },
+            )
+        )
+
+        card_prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+        approval_id = str(card_prompt.metadata.get("_exec_approval_id") or "")
+        assert approval_id
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_requester",
+                chat_id="oc_group_1",
+                content=f"/approve {approval_id} deny",
+                metadata={
+                    "msg_type": "interactive",
+                    "message_id": "om_exec_run_deny_2",
+                    "_suppress_progress": True,
+                    "source": "card_action",
+                },
+            )
+        )
+        deny_reply = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+        assert deny_reply.content == f"✅ Exec approval denied (ID: {approval_id})."
+
+        session = loop.sessions.get_or_create("feishu:oc_group_1")
+        assert AgentLoop.RESUME_STATE_METADATA_KEY not in session.metadata
+        assert target.exists()
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_requester",
+                chat_id="oc_group_1",
+                content="say hello",
+                metadata={
+                    "msg_type": "text",
+                    "message_id": "om_exec_run_deny_3",
+                    "_suppress_progress": True,
+                },
+            )
+        )
+        follow_up = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+        assert follow_up.content == "fresh turn works"
+        assert provider.calls == 2
+    finally:
+        loop.stop()
+        await asyncio.wait_for(runner, timeout=2.0)

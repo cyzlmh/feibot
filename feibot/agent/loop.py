@@ -38,7 +38,7 @@ from feibot.agent.tools.web import WebFetchTool, WebSearchTool
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.channels.allow_from import extract_allow_from_open_ids
-from feibot.providers.base import LLMProvider
+from feibot.providers.base import LLMProvider, LLMResponse
 from feibot.session.channel_log import ChannelLogStore, LogEntry
 from feibot.session.manager import Session, SessionManager
 
@@ -123,6 +123,7 @@ class AgentLoop:
         debug: bool = False,
         agent_name: str = "feibot",
         disabled_tools: list[str] | None = None,
+        llm_timeout: float | None = None,
     ):
         from feibot.config.schema import ExecToolConfig
 
@@ -148,6 +149,7 @@ class AgentLoop:
         self.allowed_dirs = allowed_dirs
         self.debug = debug
         self.agent_name = agent_name
+        self.llm_timeout = float(llm_timeout) if llm_timeout and llm_timeout > 0 else None
         self.exec_approvals = ExecApprovalManager(
             enabled=bool(getattr(self.exec_config, "approval_enabled", True)),
             approvers=list(getattr(self.exec_config, "approval_approvers", []) or []),
@@ -543,6 +545,7 @@ class AgentLoop:
 
     def _schedule_exec_after_approval(self, resolution: ExecApprovalResolution) -> None:
         task = asyncio.create_task(self._run_approved_exec(resolution))
+        setattr(task, "_session_key", resolution.request.session_key)
         self._approval_execution_tasks.add(task)
 
         def _cleanup(t: asyncio.Task[None]) -> None:
@@ -743,58 +746,83 @@ class AgentLoop:
         resolution: ExecApprovalResolution,
         *,
         denial_content: str,
+        session_locked: bool = False,
     ) -> None:
+        async def _write_denial() -> None:
+            request = resolution.request
+            session = self.sessions.get_or_create(request.session_key)
+            denied_result = f"Error: exec approval denied (ID: {request.id})."
+            resume_state = self._get_resume_state(session)
+            next_state = self._advance_resume_state_after_approval(
+                resume_state,
+                approval_id=request.id,
+                replacement=denied_result,
+                status="denied",
+                reason="exec_approval_denied",
+            )
+            if next_state is not None:
+                history_messages = self._resume_history_messages_from_state(next_state)
+                if history_messages:
+                    self._append_session_history(session, history_messages)
+            # Deny should end the pending flow and allow fresh user instructions.
+            self._set_resume_state(session, None)
+
+            session.add_message("assistant", denial_content, tools_used=["exec"])
+            self.channel_logs.append(
+                session,
+                LogEntry(
+                    role="assistant",
+                    content=denial_content,
+                    timestamp=datetime.now().isoformat(),
+                    channel=request.channel,
+                    chat_id=request.chat_id,
+                ),
+            )
+            self.sessions.save(session)
+
         request = resolution.request
+        if session_locked:
+            await _write_denial()
+            return
+
         lock = self._get_session_lock(request.session_key)
         try:
             async with lock:
-                session = self.sessions.get_or_create(request.session_key)
-                denied_result = f"Error: exec approval denied (ID: {request.id})."
-                resume_state = self._get_resume_state(session)
-                next_state = self._advance_resume_state_after_approval(
-                    resume_state,
-                    approval_id=request.id,
-                    replacement=denied_result,
-                    status="paused",
-                    reason="exec_approval_denied",
-                )
-                paused_state = None
-                if next_state is not None:
-                    history_messages = self._resume_history_messages_from_state(next_state)
-                    if history_messages:
-                        self._append_session_history(session, history_messages)
-                    messages = self._resume_messages_from_state(next_state)
-                    metadata = next_state.get("metadata")
-                    if messages is not None:
-                        paused_state = self._build_resume_state(
-                            status="paused",
-                            reason="exec_approval_denied",
-                            user_goal=str(next_state.get("user_goal") or ""),
-                            messages=messages,
-                            disabled_tools=self._deserialize_disabled_tools(
-                                next_state.get("disabled_tools")
-                            ),
-                            channel=str(next_state.get("channel") or request.channel),
-                            chat_id=str(next_state.get("chat_id") or request.chat_id),
-                            sender_id=str(next_state.get("sender_id") or request.requester_id),
-                            metadata=metadata if isinstance(metadata, dict) else {},
-                        )
-                self._set_resume_state(session, paused_state)
-
-                session.add_message("assistant", denial_content, tools_used=["exec"])
-                self.channel_logs.append(
-                    session,
-                    LogEntry(
-                        role="assistant",
-                        content=denial_content,
-                        timestamp=datetime.now().isoformat(),
-                        channel=request.channel,
-                        chat_id=request.chat_id,
-                    ),
-                )
-                self.sessions.save(session)
+                await _write_denial()
         finally:
             self._prune_session_lock(request.session_key, lock)
+
+    @staticmethod
+    async def _cancellation_checkpoint() -> None:
+        """Yield control so pending task cancellation is raised quickly."""
+        await asyncio.sleep(0)
+
+    async def _chat_with_optional_timeout(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        chat_coro = self.provider.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if self.llm_timeout is None:
+            return await chat_coro
+        try:
+            return await asyncio.wait_for(chat_coro, timeout=self.llm_timeout)
+        except asyncio.TimeoutError:
+            timeout_str = f"{self.llm_timeout:g}"
+            return LLMResponse(
+                content=f"Error calling LLM: request timed out after {timeout_str} seconds.",
+                finish_reason="error",
+            )
 
     def _restore_resume_context(
         self,
@@ -1403,7 +1431,8 @@ class AgentLoop:
                 self.tools.get_definitions(),
                 disabled_tools=disabled_tools,
             )
-            response = await self.provider.chat(
+            await self._cancellation_checkpoint()
+            response = await self._chat_with_optional_timeout(
                 messages=messages,
                 tools=tool_defs,
                 model=self.model,
@@ -1500,6 +1529,7 @@ class AgentLoop:
                         )
                         return final_content, tools_used, loop_meta
 
+                    await self._cancellation_checkpoint()
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     if disabled_tools and tool_call.name in disabled_tools:
                         result = f"Error: Tool '{tool_call.name}' not found"
@@ -1683,12 +1713,23 @@ class AgentLoop:
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
         tasks = self._active_tasks.pop(msg.session_key, [])
-        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
-        for task in tasks:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        approval_tasks = [
+            task
+            for task in self._approval_execution_tasks
+            if str(getattr(task, "_session_key", "")) == msg.session_key
+        ]
+        wait_tasks: list[asyncio.Task[Any]] = list(dict.fromkeys([*tasks, *approval_tasks]))
+        cancelled = sum(1 for t in wait_tasks if not t.done() and t.cancel())
+        if wait_tasks:
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
+
+        lock = self._session_locks.get(msg.session_key)
+        if lock is not None and lock.locked():
+            while lock.locked():
+                await asyncio.sleep(0.01)
+        if lock is not None and not lock.locked():
+            self._prune_session_lock(msg.session_key, lock)
+
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
         total = cancelled + sub_cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
@@ -1940,9 +1981,14 @@ class AgentLoop:
 
             if resolution.decision == "deny":
                 deny_content = f"✅ Exec approval denied (ID: {resolution.request.id})."
+                current_task = asyncio.current_task()
+                session_locked = bool(
+                    current_task and current_task in self._active_tasks.get(key, [])
+                )
                 await self._record_exec_deny_history(
                     resolution,
                     denial_content=deny_content,
+                    session_locked=session_locked,
                 )
                 return OutboundMessage(
                     channel=msg.channel,
@@ -2349,7 +2395,7 @@ The save_memory tool requires:
                 },
                 {"role": "user", "content": prompt},
             ]
-            response = await self.provider.chat(
+            response = await self._chat_with_optional_timeout(
                 messages=consolidation_messages,
                 tools=_SAVE_MEMORY_TOOL,
                 model=self.model,

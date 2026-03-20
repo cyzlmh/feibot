@@ -112,3 +112,79 @@ async def test_stop_command_cancels_active_session_task(monkeypatch, tmp_path: P
     finally:
         loop.stop()
         await asyncio.wait_for(runner, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_command_cancels_waiting_session_tasks_and_releases_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bus = MessageBus()
+    loop = _make_loop(tmp_path, bus=bus)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _fake_process_message(msg: InboundMessage, session_key: str | None = None):
+        if msg.content == "long task":
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="done")
+        if msg.content == "queued task":
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="queued")
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="fresh")
+
+    monkeypatch.setattr(loop, "_process_message", _fake_process_message)
+
+    runner = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_test",
+                chat_id="oc_group_lock",
+                content="long task",
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_test",
+                chat_id="oc_group_lock",
+                content="queued task",
+            )
+        )
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_test",
+                chat_id="oc_group_lock",
+                content="/stop",
+            )
+        )
+
+        stop_reply = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        assert "Stopped" in stop_reply.content
+        await asyncio.wait_for(cancelled.wait(), timeout=2.0)
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="feishu",
+                sender_id="ou_test",
+                chat_id="oc_group_lock",
+                content="after stop",
+            )
+        )
+        post_stop_reply = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        assert post_stop_reply.content == "fresh"
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(bus.consume_outbound(), timeout=0.2)
+    finally:
+        loop.stop()
+        await asyncio.wait_for(runner, timeout=2.0)
