@@ -68,7 +68,16 @@
   "skills": {
     "env": {
       "OPENAI_API_KEY": "<OPENAI_API_KEY>",
-      "OPENAI_BASE_URL": "https://api.openai.com/v1"
+      "OPENAI_BASE_URL": "https://api.openai.com/v1",
+      "STORYBOOK_IMAGE_API": "https://openrouter.ai/api/v1/chat/completions",
+      "STORYBOOK_IMAGE_KEY": "<OPENROUTER_API_KEY>",
+      "STORYBOOK_IMAGE_MODEL": "bytedance-seed/seedream-4.5",
+      "STORYBOOK_VISION_API": "https://openai.melody.games/v1/chat/completions",
+      "STORYBOOK_VISION_KEY": "<NEWAPI_API_KEY>",
+      "STORYBOOK_VISION_MODEL": "kimi-k2.5",
+      "STORYBOOK_TEXT_API": "https://openai.melody.games/v1/chat/completions",
+      "STORYBOOK_TEXT_KEY": "<NEWAPI_API_KEY>",
+      "STORYBOOK_TEXT_MODEL": "kimi-k2.5"
     }
   }
 }

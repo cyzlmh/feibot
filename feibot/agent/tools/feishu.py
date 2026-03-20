@@ -251,3 +251,15 @@ class FeishuSendFileTool(Tool):
                 details.append(f"log_id={log_id}")
         detail_text = f" ({'; '.join(details)})" if details else ""
         return f"{stage}: http={resp.status_code}, code={code}, msg={msg}{detail_text}"
+
+    def set_context(self, chat_id: str) -> None:
+        """Update the default receive_id and receive_id_type based on current chat context.
+        
+        Group chats (oc_*) use chat_id type.
+        Direct messages (ou_*) use open_id type.
+        """
+        if not chat_id:
+            return
+        self.default_receive_id = chat_id
+        # Group chats start with "oc_", direct messages start with "ou_"
+        self.default_receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"

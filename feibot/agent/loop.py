@@ -273,6 +273,10 @@ class AgentLoop:
                 sender_id=sender_id,
                 session_key=session_key or f"{channel}:{chat_id}",
             )
+        # Feishu file tool needs chat_id context for correct receive_id_type
+        feishu_file_tool = self.tools.get("feishu_send_file")
+        if isinstance(feishu_file_tool, FeishuSendFileTool):
+            feishu_file_tool.set_context(chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -2058,12 +2062,14 @@ class AgentLoop:
             logger.info(f"Backfilled {synced_count} user messages from raw log for session {key}")
             self.sessions.save(session)
 
-        if msg_type == "file":
+        if msg_type in {"file", "image", "audio"}:
             file_refs = self._collect_inbound_file_refs(msg)
             cached_files = self._cache_pending_files(session, file_refs)
+            type_names = {"file": "文件", "image": "图片", "audio": "音频"}
+            type_name = type_names.get(msg_type, "文件")
             final_content = (
-                "已收到文件并缓存。\n"
-                "请再发一条文字说明你的意图（例如：总结、提取要点、翻译、生成笔记）。"
+                f"已收到{type_name}并缓存。\n"
+                "请再发一条文字说明你的意图（例如：总结、提取要点、翻译、生成笔记、OCR、描述图片）。"
             )
             if not cached_files:
                 final_content += "\n\n（提示：当前消息里没有可用的本地文件路径，后续处理可能需要通道侧先下载附件。）"

@@ -1,7 +1,5 @@
 """Context builder for assembling agent prompts."""
 
-import base64
-import mimetypes
 import platform
 import time
 from datetime import datetime
@@ -207,22 +205,17 @@ Use the current session history for the active conversation. Older sessions live
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """Build user message content with optional media paths.
+        
+        Media files (images, files, audio) are shown as path references,
+        allowing the agent to decide whether to process them based on user instructions.
+        """
         if not media:
             return text
         
-        images = []
-        for path in media:
-            p = Path(path)
-            mime, _ = mimetypes.guess_type(path)
-            if not p.is_file() or not mime or not mime.startswith("image/"):
-                continue
-            b64 = base64.b64encode(p.read_bytes()).decode()
-            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
-        if not images:
-            return text
-        return images + [{"type": "text", "text": text}]
+        # List media paths as text references, don't auto-encode images
+        media_notes = [f"[media: {path}]" for path in media]
+        return text + "\n" + "\n".join(media_notes) if text else "\n".join(media_notes)
     
     def add_tool_result(
         self,
