@@ -2,6 +2,7 @@
 
 import json
 import mimetypes
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,14 @@ class FeishuSendFileTool(Tool):
     ):
         self.app_id = app_id
         self.app_secret = app_secret
-        self.default_receive_id = default_receive_id
-        self.default_receive_id_type = default_receive_id_type
+        self._default_receive_id_ctx: ContextVar[str] = ContextVar(
+            "feishu_default_receive_id",
+            default=default_receive_id,
+        )
+        self._default_receive_id_type_ctx: ContextVar[str] = ContextVar(
+            "feishu_default_receive_id_type",
+            default=default_receive_id_type,
+        )
         self.allowed_dir = allowed_dir
         self.base_url = base_url.rstrip("/")
 
@@ -85,8 +92,8 @@ class FeishuSendFileTool(Tool):
         except Exception as e:
             return f"Error: {e}"
 
-        target_id = (receive_id or self.default_receive_id or "").strip()
-        target_type = (receive_id_type or self.default_receive_id_type or "open_id").strip()
+        target_id = (receive_id or self._default_receive_id_ctx.get() or "").strip()
+        target_type = (receive_id_type or self._default_receive_id_type_ctx.get() or "open_id").strip()
 
         if not target_id:
             return "Error: Missing receive_id. Pass receive_id or configure channels.feishu.allow_from."
@@ -257,9 +264,10 @@ class FeishuSendFileTool(Tool):
         
         Group chats (oc_*) use chat_id type.
         Direct messages (ou_*) use open_id type.
+        Uses ContextVar for thread-safe per-request context.
         """
         if not chat_id:
             return
-        self.default_receive_id = chat_id
+        self._default_receive_id_ctx.set(chat_id)
         # Group chats start with "oc_", direct messages start with "ou_"
-        self.default_receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
+        self._default_receive_id_type_ctx.set("chat_id" if chat_id.startswith("oc_") else "open_id")
