@@ -51,7 +51,9 @@ class ExecTool(Tool):
             # Critical command patterns (dangerous-risk approval).
             # Block disk utility commands, but avoid matching option flags like
             # "--format"/"--merge-output-format" used by tools such as yt-dlp.
-            r"(?<!-)\b(format|mkfs(?:\.[\w-]+)?|diskpart)\b",
+            # Also avoid matching file names like "format.log" by requiring format
+            # to be followed by a space, semicolon, pipe, or end of string.
+            r"(?<!-)\b(format|mkfs(?:\.[\w-]+)?|diskpart)\b(?=[\s;|&]|$)",
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
