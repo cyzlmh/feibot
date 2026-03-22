@@ -11,6 +11,7 @@ from loguru import logger
 from feibot.bus.events import OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.channels.feishu import FeishuChannel
+from feibot.channels.wechat import WeChatChannel
 from feibot.config.schema import Config
 
 
@@ -19,9 +20,9 @@ class ChannelManager:
     Manages chat channels and coordinates message routing.
     
     Responsibilities:
-    - Initialize enabled channels (Feishu only)
+    - Initialize enabled channels (Feishu, WeChat)
     - Start/stop channels
-    - Route outbound messages
+    - Route outbound messages to correct channels
     """
     
     def __init__(self, config: Config, bus: MessageBus, workspace_dir: Path | None = None):
@@ -29,6 +30,7 @@ class ChannelManager:
         self.bus = bus
         self.workspace_dir = workspace_dir
         self.feishu: FeishuChannel | None = None
+        self.wechat: WeChatChannel | None = None
         self._dispatch_task: asyncio.Task | None = None
         
         self._init_channels()
@@ -36,36 +38,56 @@ class ChannelManager:
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
 
-        if not self.config.channels.feishu.enabled:
-            return
+        # Init Feishu channel
+        if self.config.channels.feishu.enabled:
+            self.feishu = FeishuChannel(
+                self.config.channels.feishu,
+                self.bus,
+                workspace_dir=self.workspace_dir,
+            )
+            logger.info("Feishu channel enabled")
 
-        self.feishu = FeishuChannel(
-            self.config.channels.feishu,
-            self.bus,
-            workspace_dir=self.workspace_dir,
-        )
-        logger.info("Feishu channel enabled")
+        # Init WeChat channel
+        if self.config.channels.wechat.enabled:
+            # Try to load saved credentials
+            self.wechat = WeChatChannel(
+                self.config.channels.wechat,
+                self.bus,
+                state_dir=Path.home() / ".feibot" / "wechat",
+            )
+            # Load saved credentials if available
+            if not self.config.channels.wechat.bot_token:
+                self.wechat.load_credentials()
+            logger.info("WeChat channel enabled")
     
-    async def _start_channel(self, channel: FeishuChannel) -> None:
-        """Start Feishu channel and log any exceptions."""
+    async def _start_channel(self, channel: FeishuChannel | WeChatChannel) -> None:
+        """Start a channel and log any exceptions."""
+        channel_name = channel.name
         try:
             await channel.start()
         except Exception as e:
-            logger.error(f"Failed to start Feishu channel: {e}")
+            logger.error(f"Failed to start {channel_name} channel: {e}")
 
     async def start_all(self) -> None:
-        """Start Feishu channel and the outbound dispatcher."""
-        if self.feishu is None:
-            logger.warning("Feishu channel is not enabled")
-            return
-        
+        """Start all enabled channels and the outbound dispatcher."""
         # Start outbound dispatcher
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
-        logger.info("Starting feishu channel...")
-        await self._start_channel(self.feishu)
+        
+        # Start Feishu
+        if self.feishu is not None:
+            logger.info("Starting Feishu channel...")
+            await self._start_channel(self.feishu)
+        
+        # Start WeChat
+        if self.wechat is not None:
+            logger.info("Starting WeChat channel...")
+            await self._start_channel(self.wechat)
+        
+        if self.feishu is None and self.wechat is None:
+            logger.warning("No channels are enabled")
     
     async def stop_all(self) -> None:
-        """Stop Feishu channel and the dispatcher."""
+        """Stop all channels and the dispatcher."""
         logger.info("Stopping channel manager...")
         
         # Stop dispatcher
@@ -76,16 +98,24 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
         
-        # Stop Feishu channel
+        # Stop Feishu
         if self.feishu is not None:
             try:
                 await self.feishu.stop()
-                logger.info("Stopped feishu channel")
+                logger.info("Stopped Feishu channel")
             except Exception as e:
-                logger.error(f"Error stopping feishu: {e}")
+                logger.error(f"Error stopping Feishu: {e}")
+        
+        # Stop WeChat
+        if self.wechat is not None:
+            try:
+                await self.wechat.stop()
+                logger.info("Stopped WeChat channel")
+            except Exception as e:
+                logger.error(f"Error stopping WeChat: {e}")
     
     async def _dispatch_outbound(self) -> None:
-        """Dispatch outbound messages to Feishu."""
+        """Dispatch outbound messages to appropriate channels."""
         logger.info("Outbound dispatcher started")
         
         while True:
@@ -95,41 +125,54 @@ class ChannelManager:
                     timeout=1.0
                 )
 
+                # Handle progress messages
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
                         continue
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
-                if msg.channel != "feishu":
-                    logger.debug(f"Skipping outbound message for non-Feishu channel: {msg.channel}")
-                    continue
-
-                if self.feishu is None:
-                    logger.warning("Dropping Feishu outbound message: channel is disabled")
+                # Route to correct channel
+                channel = self.get_channel(msg.channel)
+                if channel is None:
+                    logger.warning(f"Dropping outbound message: channel '{msg.channel}' not available")
                     continue
 
                 try:
-                    await self.feishu.send(msg)
+                    await channel.send(msg)
                 except Exception as e:
-                    logger.error(f"Error sending to Feishu: {e}")
+                    logger.error(f"Error sending to {msg.channel}: {e}")
                     
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+        
+        logger.info("Outbound dispatcher stopped")
     
-    def get_channel(self, name: str) -> FeishuChannel | None:
+    def get_channel(self, name: str) -> FeishuChannel | WeChatChannel | None:
         """Get a channel by name."""
-        return self.feishu if name == "feishu" else None
+        if name == "feishu":
+            return self.feishu
+        elif name == "wechat":
+            return self.wechat
+        return None
     
     def get_status(self) -> dict[str, Any]:
-        """Get status of the Feishu channel."""
-        if self.feishu is None:
-            return {}
-        return {"feishu": {"enabled": True, "running": self.feishu.is_running}}
+        """Get status of all channels."""
+        status = {}
+        if self.feishu is not None:
+            status["feishu"] = {"enabled": True, "running": self.feishu.is_running}
+        if self.wechat is not None:
+            status["wechat"] = {"enabled": True, "running": self.wechat.is_running}
+        return status
     
     @property
     def enabled_channels(self) -> list[str]:
         """Get list of enabled channel names."""
-        return ["feishu"] if self.feishu is not None else []
+        channels = []
+        if self.feishu is not None:
+            channels.append("feishu")
+        if self.wechat is not None:
+            channels.append("wechat")
+        return channels

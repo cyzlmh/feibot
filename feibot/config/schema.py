@@ -21,11 +21,24 @@ class FeishuConfig(BaseModel):
     doc_write_auto_chunk_threshold_chars: int = 6000  # 0 disables auto switch for write/append
 
 
+class WeChatConfig(BaseModel):
+    """WeChat channel configuration using ilink API (OpenClaw-compatible)."""
+    enabled: bool = False
+    bot_type: str = "3"  # OpenClaw bot_type for ilink API
+    api_base_url: str = "https://ilinkai.weixin.qq.com"  # ilink API endpoint
+    cdn_base_url: str = "https://novac2c.cdn.weixin.qq.com/c2c"  # CDN for media upload
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
+    # Account credentials (stored after QR login)
+    bot_token: str = ""  # Obtained via QR login
+    ilink_bot_id: str = ""  # Bot ID obtained via QR login
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for Feishu channel behavior."""
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = True  # stream tool-call hints (e.g. read_file("…"))
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    wechat: WeChatConfig = Field(default_factory=WeChatConfig)
 
 
 class RetryPolicyConfig(BaseModel):

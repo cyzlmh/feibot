@@ -148,7 +148,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
     config: Path = typer.Option(
-        ...,
+        None,  # Changed from required to optional
         "--config",
         "-c",
         help="Path to config file",
@@ -1068,6 +1068,69 @@ def cron_run(
 
 provider_app = typer.Typer(help="Manage providers")
 app.add_typer(provider_app, name="provider")
+
+wechat_app = typer.Typer(help="Manage WeChat channel")
+app.add_typer(wechat_app, name="wechat")
+
+
+@wechat_app.command("login")
+def wechat_login():
+    """Login to WeChat via QR code scan."""
+    from feibot.channels.wechat import WeChatChannel
+    from feibot.config.schema import WeChatConfig
+    from feibot.bus.queue import MessageBus
+
+    console.print(f"{__logo__} WeChat Login\n")
+    
+    # Create a minimal config for login
+    config = WeChatConfig(enabled=True)
+    bus = MessageBus()
+    
+    # Create channel instance
+    channel = WeChatChannel(config, bus)
+    
+    # Run login
+    async def do_login():
+        return await channel.login()
+    
+    success = asyncio.run(do_login())
+    
+    if success:
+        console.print("\n[green]✓ WeChat login successful![/green]")
+        console.print(f"[dim]Credentials saved to: {channel.state_dir}[/dim]")
+        console.print("\nAdd to your config to enable:")
+        console.print("""[cyan]
+channels:
+  wechat:
+    enabled: true
+[/cyan]""")
+    else:
+        console.print("\n[red]✗ WeChat login failed[/red]")
+        raise typer.Exit(1)
+
+
+@wechat_app.command("status")
+def wechat_status():
+    """Check WeChat login status."""
+    from pathlib import Path
+    import json
+
+    cred_file = Path.home() / ".feibot" / "wechat" / "credentials.json"
+    
+    if not cred_file.exists():
+        console.print("[yellow]Not logged in to WeChat[/yellow]")
+        console.print("Run: [cyan]feibot wechat login[/cyan]")
+        return
+    
+    try:
+        with open(cred_file) as f:
+            data = json.load(f)
+        
+        console.print("[green]✓ Logged in to WeChat[/green]")
+        console.print(f"  Bot ID: [cyan]{data.get('ilink_bot_id', 'N/A')}[/cyan]")
+        console.print(f"  Saved: [dim]{data.get('saved_at', 'N/A')}[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error reading credentials: {e}[/red]")
 
 
 @provider_app.command("login")
