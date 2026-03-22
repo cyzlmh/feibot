@@ -230,9 +230,15 @@ class WeChatChannel(BaseChannel):
             msg_type = msg.get("msg_type", 0)
             context_token = msg.get("context_token", "")
             
+            # Log the sender for allow_from configuration
+            logger.info(f"WeChat message from user_id=[yellow]{from_user}[/yellow]")
+            
             # Store context token for replying
             if from_user and context_token:
                 self._context_tokens[from_user] = context_token
+            
+            # Save contact info for status command
+            self._save_contact(from_user, msg)
             
             # Extract content based on message type
             content = ""
@@ -447,3 +453,40 @@ class WeChatChannel(BaseChannel):
         except Exception as e:
             logger.error(f"Error loading credentials: {e}")
             return False
+    
+    def _save_contact(self, user_id: str, msg: dict[str, Any]) -> None:
+        """Save contact info for allow_from configuration."""
+        contacts_file = self.state_dir / "contacts.json"
+        
+        # Load existing contacts
+        contacts = {}
+        if contacts_file.exists():
+            try:
+                with open(contacts_file) as f:
+                    contacts = json.load(f)
+            except Exception:
+                pass
+        
+        # Update contact info
+        if user_id and user_id not in contacts:
+            contacts[user_id] = {
+                "first_seen": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "nickname": msg.get("nickname", ""),
+            }
+            
+            with open(contacts_file, "w") as f:
+                json.dump(contacts, f, indent=2)
+    
+    @staticmethod
+    def get_contacts() -> dict[str, Any]:
+        """Get saved contacts (for CLI status command)."""
+        contacts_file = Path.home() / ".feibot" / "wechat" / "contacts.json"
+        
+        if not contacts_file.exists():
+            return {}
+        
+        try:
+            with open(contacts_file) as f:
+                return json.load(f)
+        except Exception:
+            return {}

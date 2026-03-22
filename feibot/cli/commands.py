@@ -1111,11 +1111,12 @@ channels:
 
 @wechat_app.command("status")
 def wechat_status():
-    """Check WeChat login status."""
+    """Check WeChat login status and show known contacts."""
     from pathlib import Path
     import json
 
     cred_file = Path.home() / ".feibot" / "wechat" / "credentials.json"
+    contacts_file = Path.home() / ".feibot" / "wechat" / "contacts.json"
     
     if not cred_file.exists():
         console.print("[yellow]Not logged in to WeChat[/yellow]")
@@ -1129,6 +1130,30 @@ def wechat_status():
         console.print("[green]✓ Logged in to WeChat[/green]")
         console.print(f"  Bot ID: [cyan]{data.get('ilink_bot_id', 'N/A')}[/cyan]")
         console.print(f"  Saved: [dim]{data.get('saved_at', 'N/A')}[/dim]")
+        
+        # Show contacts for allow_from configuration
+        if contacts_file.exists():
+            with open(contacts_file) as f:
+                contacts = json.load(f)
+            
+            if contacts:
+                console.print("\n[bold]Known contacts (add to allow_from):[/bold]")
+                for user_id, info in contacts.items():
+                    nickname = info.get("nickname", "")
+                    first_seen = info.get("first_seen", "")
+                    console.print(f"  [cyan]{user_id}[/cyan]")
+                    if nickname:
+                        console.print(f"    Nickname: {nickname}")
+                    console.print(f"    First seen: [dim]{first_seen}[/dim]")
+                
+                console.print("\n[dim]Add user_id to your config:[/dim]")
+                console.print("""[cyan]
+channels:
+  wechat:
+    enabled: true
+    allow_from:
+      - "<user_id>"
+[/cyan]""")
     except Exception as e:
         console.print(f"[red]Error reading credentials: {e}[/red]")
 
