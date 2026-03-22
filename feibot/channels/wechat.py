@@ -4,6 +4,7 @@ This uses the same ilink API as OpenClaw's official WeChat plugin.
 No special authorization required - just scan QR code to login.
 
 Reference: @tencent-weixin/openclaw-weixin (MIT licensed)
+Reference: nanobot PR #2348 (weixin.py)
 """
 
 from __future__ import annotations
@@ -11,10 +12,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import random
 import time
+import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from loguru import logger
@@ -23,6 +28,81 @@ from feibot.bus.events import OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.channels.base import BaseChannel
 from feibot.config.schema import WeChatConfig
+
+
+# ---------------------------------------------------------------------------
+# Protocol constants (from openclaw-weixin types.ts)
+# ---------------------------------------------------------------------------
+
+# MessageItemType
+ITEM_TEXT = 1
+ITEM_IMAGE = 2
+ITEM_VOICE = 3
+ITEM_FILE = 4
+ITEM_VIDEO = 5
+
+# MessageType (1 = inbound from user, 2 = outbound from bot)
+MESSAGE_TYPE_USER = 1
+MESSAGE_TYPE_BOT = 2
+
+# MessageState
+MESSAGE_STATE_FINISH = 2
+
+# Max message length before splitting
+WECHAT_MAX_MESSAGE_LEN = 4000
+
+# Base info for API calls
+BASE_INFO: dict[str, str] = {"channel_version": "1.0.2"}
+
+# Session-expired error code
+ERRCODE_SESSION_EXPIRED = -14
+
+# Retry constants
+MAX_CONSECUTIVE_FAILURES = 3
+BACKOFF_DELAY_S = 30
+RETRY_DELAY_S = 2
+
+# Default long-poll timeout
+DEFAULT_LONG_POLL_TIMEOUT_S = 35
+
+# CDN base URL for media download
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+
+
+# ---------------------------------------------------------------------------
+# AES-128-ECB decryption (from pic-decrypt.ts)
+# ---------------------------------------------------------------------------
+
+def _parse_aes_key(aes_key_b64: str) -> bytes:
+    """Parse a base64-encoded AES key.
+    
+    Handles two encodings:
+    - base64(raw 16 bytes) -> images
+    - base64(hex string of 16 bytes) -> file/voice/video
+    """
+    raw = base64.b64decode(aes_key_b64)
+    # If 32 bytes, it's hex-encoded
+    if len(raw) == 32:
+        try:
+            return bytes.fromhex(raw.decode("ascii"))
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return raw
+
+
+def _decrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
+    """Decrypt AES-128-ECB encrypted media."""
+    try:
+        from Crypto.Cipher import AES
+        key = _parse_aes_key(aes_key_b64)
+        cipher = AES.new(key, AES.MODE_ECB)
+        return cipher.decrypt(data)
+    except ImportError:
+        logger.warning("pycryptodome not installed, cannot decrypt media")
+        return data
+    except Exception as e:
+        logger.error(f"AES decryption error: {e}")
+        return data
 
 
 class WeChatChannel(BaseChannel):
@@ -64,6 +144,8 @@ class WeChatChannel(BaseChannel):
         self._poll_task: asyncio.Task | None = None
         self._get_updates_buf: str = ""  # Sync cursor for long-poll
         self._context_tokens: dict[str, str] = {}  # user_id -> context_token for replying
+        self._processed_ids: OrderedDict[str, None] = OrderedDict()  # Dedup
+        self._consecutive_failures: int = 0  # For backoff
     
     async def start(self) -> None:
         """Start the WeChat channel."""
@@ -112,9 +194,9 @@ class WeChatChannel(BaseChannel):
         logger.info("WeChat channel stopped")
     
     def _build_headers(self) -> dict[str, str]:
-        """Build common headers for API requests."""
-        # X-WECHAT-UIN: random uint32 -> base64
-        uin = random.randint(0, 2**32 - 1)
+        """Build common headers for API requests (new UIN each call)."""
+        # X-WECHAT-UIN: random uint32 -> base64 (matches reference plugin)
+        uin = int.from_bytes(os.urandom(4), "big")
         uin_b64 = base64.b64encode(str(uin).encode()).decode()
         
         return {
@@ -140,6 +222,9 @@ class WeChatChannel(BaseChannel):
         
         try:
             if json_body:
+                # Add base_info if not present
+                if "base_info" not in json_body:
+                    json_body["base_info"] = BASE_INFO
                 response = await self._client.post(
                     url, 
                     headers=headers, 
@@ -163,20 +248,23 @@ class WeChatChannel(BaseChannel):
             response.raise_for_status()
             data = response.json()
             
-            if data.get("ret") != 0:
-                errcode = data.get("errcode", -1)
+            logger.debug(f"WeChat API response: {data}")
+            
+            # Check for errors (use errcode, not ret)
+            errcode = data.get("errcode", 0)
+            if errcode and errcode != 0:
                 errmsg = data.get("errmsg", "unknown error")
-                logger.error(f"WeChat API error: {errcode} - {errmsg}")
-                return {"ret": -1, "errcode": errcode, "errmsg": errmsg}
+                logger.error(f"WeChat API error: errcode={errcode}, errmsg={errmsg}")
+                return {"errcode": errcode, "errmsg": errmsg}
             
             return data
             
         except httpx.HTTPStatusError as e:
             logger.error(f"WeChat API HTTP error: {e}")
-            return {"ret": -1, "errmsg": str(e)}
+            return {"errcode": -1, "errmsg": str(e)}
         except Exception as e:
             logger.error(f"WeChat API error: {e}")
-            return {"ret": -1, "errmsg": str(e)}
+            return {"errcode": -1, "errmsg": str(e)}
     
     async def _poll_messages(self) -> None:
         """Long-poll for incoming messages."""
@@ -184,10 +272,19 @@ class WeChatChannel(BaseChannel):
         
         while self._running:
             try:
+                # Backoff if too many consecutive failures
+                if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"WeChat: {self._consecutive_failures} consecutive failures, "
+                        f"backing off for {BACKOFF_DELAY_S}s"
+                    )
+                    await asyncio.sleep(BACKOFF_DELAY_S)
+                    self._consecutive_failures = 0
+                
                 # Build request body
                 body = {
                     "get_updates_buf": self._get_updates_buf,
-                    "base_info": {"channel_version": "1.0.0"},
+                    "base_info": BASE_INFO,
                 }
                 
                 # Use longer timeout for long-poll
@@ -197,14 +294,19 @@ class WeChatChannel(BaseChannel):
                     timeout=40.0,  # Slightly longer than server timeout
                 )
                 
-                if data.get("ret") != 0:
-                    errcode = data.get("errcode", 0)
-                    if errcode == -14:  # Session expired
+                # Check for errors using errcode
+                errcode = data.get("errcode", 0)
+                if errcode and errcode != 0:
+                    if errcode == ERRCODE_SESSION_EXPIRED:  # Session expired
                         logger.error("WeChat session expired. Please re-login.")
                         self._running = False
                         break
-                    await asyncio.sleep(1)
+                    self._consecutive_failures += 1
+                    await asyncio.sleep(RETRY_DELAY_S)
                     continue
+                
+                # Success - reset failure counter
+                self._consecutive_failures = 0
                 
                 # Update sync cursor
                 self._get_updates_buf = data.get("get_updates_buf", "")
@@ -218,17 +320,25 @@ class WeChatChannel(BaseChannel):
                 break
             except Exception as e:
                 logger.error(f"Error polling WeChat messages: {e}")
-                await asyncio.sleep(5)
+                self._consecutive_failures += 1
+                await asyncio.sleep(RETRY_DELAY_S)
         
         logger.info("WeChat message polling stopped")
     
     async def _handle_incoming_message(self, msg: dict[str, Any]) -> None:
-        """Handle an incoming WeChat message."""
+        """Handle an incoming WeChat message using item_list format."""
         try:
+            msg_id = str(msg.get("message_id", ""))
             from_user = msg.get("from_user_id", "")
             to_user = msg.get("to_user_id", "")  # Bot's ID
-            msg_type = msg.get("msg_type", 0)
             context_token = msg.get("context_token", "")
+            
+            # Dedup
+            if msg_id in self._processed_ids:
+                return
+            self._processed_ids[msg_id] = None
+            if len(self._processed_ids) > 1000:
+                self._processed_ids.popitem(last=False)
             
             # Log the sender for allow_from configuration
             logger.info(f"WeChat message from user_id=[yellow]{from_user}[/yellow]")
@@ -237,52 +347,178 @@ class WeChatChannel(BaseChannel):
             if from_user and context_token:
                 self._context_tokens[from_user] = context_token
             
+            # Check allow_from
+            if self.config.allow_from and from_user not in self.config.allow_from:
+                logger.debug(f"Ignoring message from unauthorized user: {from_user}")
+                return
+            
             # Save contact info for status command
             self._save_contact(from_user, msg)
             
-            # Extract content based on message type
-            content = ""
-            media: list[str] = []
+            # Parse item_list (new format from ilink API)
+            item_list: list[dict] = msg.get("item_list") or []
+            content_parts: list[str] = []
+            media_paths: list[str] = []
             
-            if msg_type == 1:  # Text message
-                content = msg.get("text", "")
-            elif msg_type == 3:  # Image message
-                content = "[图片]"
-                img_url = msg.get("thumb_url") or msg.get("cdn_url")
-                if img_url:
-                    media.append(img_url)
-            elif msg_type == 34:  # Voice message
-                content = "[语音]"
-            elif msg_type == 43:  # Video message
-                content = "[视频]"
-            elif msg_type == 49:  # Rich media/file
-                content = msg.get("title", "[文件]")
-            else:
-                content = f"[消息类型:{msg_type}]"
+            for item in item_list:
+                item_type = item.get("type", 0)
+                
+                if item_type == ITEM_TEXT:
+                    text = (item.get("text_item") or {}).get("text", "")
+                    if text:
+                        # Handle quoted messages
+                        ref = item.get("ref_msg")
+                        if ref:
+                            ref_item = ref.get("message_item")
+                            if ref_item and ref_item.get("type", 0) in (
+                                ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO
+                            ):
+                                content_parts.append(text)
+                            else:
+                                parts: list[str] = []
+                                if ref.get("title"):
+                                    parts.append(ref["title"])
+                                if ref_item:
+                                    ref_text = (ref_item.get("text_item") or {}).get("text", "")
+                                    if ref_text:
+                                        parts.append(ref_text)
+                                if parts:
+                                    content_parts.append(f"[引用: {' | '.join(parts)}]\n{text}")
+                                else:
+                                    content_parts.append(text)
+                        else:
+                            content_parts.append(text)
+                
+                elif item_type == ITEM_IMAGE:
+                    image_item = item.get("image_item") or {}
+                    file_path = await self._download_media_item(image_item, "image")
+                    if file_path:
+                        content_parts.append(f"[图片]\n[Image: {file_path}]")
+                        media_paths.append(file_path)
+                    else:
+                        content_parts.append("[图片]")
+                
+                elif item_type == ITEM_VOICE:
+                    voice_item = item.get("voice_item") or {}
+                    voice_text = voice_item.get("text", "")  # WeChat voice-to-text
+                    if voice_text:
+                        content_parts.append(f"[语音] {voice_text}")
+                    else:
+                        file_path = await self._download_media_item(voice_item, "voice")
+                        if file_path:
+                            content_parts.append(f"[语音]\n[Audio: {file_path}]")
+                            media_paths.append(file_path)
+                        else:
+                            content_parts.append("[语音]")
+                
+                elif item_type == ITEM_FILE:
+                    file_item = item.get("file_item") or {}
+                    file_name = file_item.get("file_name", "unknown")
+                    file_path = await self._download_media_item(file_item, "file", file_name)
+                    if file_path:
+                        content_parts.append(f"[文件: {file_name}]\n[File: {file_path}]")
+                        media_paths.append(file_path)
+                    else:
+                        content_parts.append(f"[文件: {file_name}]")
+                
+                elif item_type == ITEM_VIDEO:
+                    video_item = item.get("video_item") or {}
+                    file_path = await self._download_media_item(video_item, "video")
+                    if file_path:
+                        content_parts.append(f"[视频]\n[Video: {file_path}]")
+                        media_paths.append(file_path)
+                    else:
+                        content_parts.append("[视频]")
             
+            content = "\n".join(content_parts)
             if not content:
                 return
+            
+            logger.info(f"WeChat inbound: items={','.join(str(i.get('type', 0)) for i in item_list)}")
             
             # Handle the message through base channel
             await self._handle_message(
                 sender_id=from_user,
                 chat_id=from_user,  # Private chat, so chat_id = user_id
                 content=content,
-                media=media if media else None,
-                metadata={
-                    "msg_type": msg_type,
-                    "context_token": context_token,
-                    "to_user": to_user,
-                },
+                media=media_paths or None,
+                metadata={"message_id": msg_id},
             )
             
         except Exception as e:
             logger.error(f"Error handling WeChat message: {e}")
     
+    async def _download_media_item(
+        self,
+        typed_item: dict,
+        media_type: str,
+        filename: str | None = None,
+    ) -> str | None:
+        """Download and decrypt a media item. Returns local path or None."""
+        try:
+            media = typed_item.get("media") or {}
+            encrypt_query_param = media.get("encrypt_query_param", "")
+            
+            if not encrypt_query_param:
+                return None
+            
+            # Resolve AES key
+            # image_item.aeskey is hex string (32 chars = 16 bytes)
+            # media.aes_key is base64-encoded
+            raw_aeskey_hex = typed_item.get("aeskey", "")
+            media_aes_key_b64 = media.get("aes_key", "")
+            
+            aes_key_b64: str = ""
+            if raw_aeskey_hex:
+                # Convert hex -> raw bytes -> base64
+                aes_key_b64 = base64.b64encode(bytes.fromhex(raw_aeskey_hex)).decode()
+            elif media_aes_key_b64:
+                aes_key_b64 = media_aes_key_b64
+            
+            # Build CDN download URL
+            cdn_url = f"{CDN_BASE_URL}/download?encrypted_query_param={quote(encrypt_query_param)}"
+            
+            assert self._client is not None
+            resp = await self._client.get(cdn_url)
+            resp.raise_for_status()
+            data = resp.content
+            
+            # Decrypt if we have AES key
+            if aes_key_b64 and data:
+                data = _decrypt_aes_ecb(data, aes_key_b64)
+            elif not aes_key_b64:
+                logger.debug(f"No AES key for {media_type} item, using raw bytes")
+            
+            if not data:
+                return None
+            
+            # Save to media directory
+            media_dir = self.state_dir / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate filename
+            ext = {"image": ".jpg", "voice": ".mp3", "video": ".mp4", "file": ""}.get(media_type, "")
+            if not filename:
+                filename = f"{media_type}_{uuid.uuid4().hex[:8]}{ext}"
+            
+            file_path = media_dir / filename
+            file_path.write_bytes(data)
+            
+            logger.debug(f"Downloaded {media_type} to {file_path}")
+            return str(file_path)
+            
+        except Exception as e:
+            logger.error(f"Error downloading {media_type}: {e}")
+            return None
+    
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through WeChat."""
         if not self._client:
             logger.warning("WeChat client not initialized")
+            return
+        
+        content = msg.content.strip()
+        if not content:
             return
         
         user_id = msg.chat_id
@@ -292,29 +528,70 @@ class WeChatChannel(BaseChannel):
             logger.warning(f"No context_token for user {user_id}, cannot send")
             return
         
-        # Build message payload
-        body = {
-            "msg": {
-                "to_user_id": user_id,
-                "context_token": context_token,
-                "item_list": [
-                    {
-                        "type": 1,  # Text type
-                        "text_item": {
-                            "text": msg.content,
-                        },
-                    }
-                ],
-            },
-            "base_info": {"channel_version": "1.0.0"},
+        # Split message if too long (4000 chars max)
+        chunks = self._split_message(content, WECHAT_MAX_MESSAGE_LEN)
+        
+        for chunk in chunks:
+            await self._send_text(user_id, chunk, context_token)
+    
+    def _split_message(self, text: str, max_len: int) -> list[str]:
+        """Split message into chunks respecting max length."""
+        if len(text) <= max_len:
+            return [text]
+        
+        chunks = []
+        while text:
+            if len(text) <= max_len:
+                chunks.append(text)
+                break
+            # Try to split at newline or space
+            split_pos = max_len
+            for i in range(max_len - 1, max(0, max_len - 100), -1):
+                if text[i] in '\n ':
+                    split_pos = i + 1
+                    break
+            chunks.append(text[:split_pos])
+            text = text[split_pos:]
+        return chunks
+    
+    async def _send_text(
+        self,
+        to_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> None:
+        """Send a text message matching the exact protocol from nanobot PR #2348."""
+        client_id = f"feibot-{uuid.uuid4().hex[:12]}"
+        
+        item_list: list[dict] = []
+        if text:
+            item_list.append({"type": ITEM_TEXT, "text_item": {"text": text}})
+        
+        weixin_msg: dict[str, Any] = {
+            "from_user_id": "",
+            "to_user_id": to_user_id,
+            "client_id": client_id,
+            "message_type": MESSAGE_TYPE_BOT,
+            "message_state": MESSAGE_STATE_FINISH,
+        }
+        if item_list:
+            weixin_msg["item_list"] = item_list
+        if context_token:
+            weixin_msg["context_token"] = context_token
+        
+        body: dict[str, Any] = {
+            "msg": weixin_msg,
+            "base_info": BASE_INFO,
         }
         
         data = await self._api_call("sendmessage", json_body=body)
         
-        if data.get("ret") == 0:
-            logger.debug(f"Sent WeChat message to user {user_id}")
+        # Check for errors using errcode
+        errcode = data.get("errcode", 0)
+        if errcode and errcode != 0:
+            logger.warning(f"WeChat send error (code {errcode}): {data.get('errmsg')}")
         else:
-            logger.error(f"Failed to send WeChat message: {data.get('errmsg')}")
+            logger.debug(f"Sent WeChat message to user {to_user_id}")
     
     # ==================== Login Methods ====================
     

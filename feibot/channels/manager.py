@@ -73,18 +73,23 @@ class ChannelManager:
         # Start outbound dispatcher
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
         
-        # Start Feishu
+        # Start all channels in parallel (each runs its own loop)
+        tasks = []
+        
         if self.feishu is not None:
             logger.info("Starting Feishu channel...")
-            await self._start_channel(self.feishu)
+            tasks.append(asyncio.create_task(self._start_channel(self.feishu)))
         
-        # Start WeChat
         if self.wechat is not None:
             logger.info("Starting WeChat channel...")
-            await self._start_channel(self.wechat)
+            tasks.append(asyncio.create_task(self._start_channel(self.wechat)))
         
-        if self.feishu is None and self.wechat is None:
+        if not tasks:
             logger.warning("No channels are enabled")
+        
+        # Wait for all channels (they run indefinitely until stopped)
+        if tasks:
+            await asyncio.gather(*tasks)
     
     async def stop_all(self) -> None:
         """Stop all channels and the dispatcher."""
