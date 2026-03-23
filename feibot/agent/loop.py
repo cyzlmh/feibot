@@ -1246,33 +1246,25 @@ class AgentLoop:
         hints: list[str] = []
         for tc in tool_calls:
             args = getattr(tc, "arguments", None) or {}
-            preview_key = ""
             preview_val: str | None = None
             if isinstance(args, dict) and args:
                 for key in preferred_keys_by_tool.get(tc.name, default_preferred_keys):
                     val = args.get(key)
                     if isinstance(val, str) and val.strip():
-                        preview_key = key
                         preview_val = val
                         break
                 if preview_val is None:
-                    for key, val in args.items():
+                    for val in args.values():
                         if isinstance(val, str) and val.strip():
-                            preview_key = str(key)
                             preview_val = val
                             break
 
             if isinstance(preview_val, str):
                 compact = re.sub(r"\s+", " ", preview_val).strip()
-                preview = compact[:60] + "…" if len(compact) > 60 else compact
-                preview = preview.replace('"', "'")
-                if preview_key:
-                    hints.append(f'**{tc.name}** • {preview_key}: `{preview}`')
-                else:
-                    hints.append(f'**{tc.name}** • `{preview}`')
+                hints.append(f"**{tc.name}**\n```\n{compact}\n```")
             else:
-                hints.append(f'**{tc.name}**')
-        return "\n".join(f"{i+1}. {hint}" for i, hint in enumerate(hints))
+                hints.append(f"**{tc.name}**")
+        return "\n\n".join(hints)
 
     @classmethod
     def _extract_file_refs_from_content(cls, content: str | None) -> list[str]:

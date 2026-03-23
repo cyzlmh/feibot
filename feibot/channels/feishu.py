@@ -703,8 +703,10 @@ class FeishuChannel(BaseChannel):
             )
             return
 
+        # Tool hints should never be sent as files
+        is_tool_hint = bool(metadata.get("_tool_hint"))
         prefer_file, content_len, table_count = self._should_prefer_markdown_file(msg.content)
-        if prefer_file:
+        if prefer_file and not is_tool_hint:
             logger.info(
                 "Feishu outbound uses markdown-file mode: chars={}, tables={}",
                 content_len,
