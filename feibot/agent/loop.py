@@ -82,7 +82,6 @@ class AgentLoop:
     PENDING_FILES_METADATA_KEY = "pending_files"
     RESUME_STATE_METADATA_KEY = "resume_state"
     SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
-    REFLECT_PROMPT = "Reflect on the results and decide next steps."
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
@@ -627,8 +626,8 @@ class AgentLoop:
         messages: list[dict[str, Any]],
         remaining_tool_calls: list[Any],
         reason: str,
-        append_reflect_prompt: bool = True,
     ) -> list[dict[str, Any]]:
+        """Build resume messages after a pause, adding error results for remaining tool calls."""
         resume_messages = copy.deepcopy(messages)
         for tool_call in remaining_tool_calls:
             tool_id = str(getattr(tool_call, "id", "") or "")
@@ -641,18 +640,7 @@ class AgentLoop:
                 tool_name,
                 f"Error: {reason}",
             )
-        if append_reflect_prompt:
-            resume_messages = self._append_reflect_prompt(resume_messages)
         return resume_messages
-
-    @classmethod
-    def _append_reflect_prompt(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if messages:
-            last = messages[-1]
-            if last.get("role") == "user" and last.get("content") == cls.REFLECT_PROMPT:
-                return messages
-        messages.append({"role": "user", "content": cls.REFLECT_PROMPT})
-        return messages
 
     @staticmethod
     def _resume_messages_from_state(state: dict[str, Any] | None) -> list[dict[str, Any]] | None:
@@ -1590,7 +1578,6 @@ class AgentLoop:
                             final_content = str(content_arg).strip() if content_arg is not None else ""
                             loop_meta = _build_loop_meta("message_finish")
                             return final_content or "Message sent.", tools_used, loop_meta
-                messages = self._append_reflect_prompt(messages)
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":

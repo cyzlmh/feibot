@@ -64,11 +64,12 @@ async def test_go_command_reuses_persisted_resume_state_without_prompt_injection
     )
     seen: dict[str, object] = {}
     session = loop.sessions.get_or_create("feishu:ou_user_resume")
+    # Resume messages should end with assistant message (tool result context),
+    # not with a fake user "reflect" prompt
     resume_messages = [
         {"role": "system", "content": "system prompt"},
         {"role": "user", "content": "original request"},
         {"role": "assistant", "content": "partial progress"},
-        {"role": "user", "content": AgentLoop.REFLECT_PROMPT},
     ]
     session.metadata[AgentLoop.RESUME_STATE_METADATA_KEY] = {
         "version": 1,
