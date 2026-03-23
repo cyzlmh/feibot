@@ -4,10 +4,12 @@ import asyncio
 import copy
 import json
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import httpx
 from loguru import logger
 
 from feibot.agent.context import ContextBuilder
@@ -26,7 +28,6 @@ from feibot.agent.tools.message import MessageTool
 from feibot.agent.tools.registry import ToolRegistry
 from feibot.agent.tools.search import FindFileTool, GrepTextTool
 from feibot.agent.tools.shell import ExecTool
-from feibot.agent.tools.spawn import SpawnTool
 from feibot.agent.tools.web import WebFetchTool, WebSearchTool
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
@@ -81,7 +82,6 @@ class AgentLoop:
     MEMORY_TOOL_RESULT_MAX_CHARS = 300
     PENDING_FILES_METADATA_KEY = "pending_files"
     RESUME_STATE_METADATA_KEY = "resume_state"
-    SPAWN_CHILD_SESSION_METADATA_KEY = "spawn_child_session"
     COMMANDS_HELP_TEXT = (
         "🐈 feibot commands:\n"
         "/new — Start a new conversation\n"
@@ -136,6 +136,7 @@ class AgentLoop:
         }
         self.exec_config = exec_config or ExecToolConfig()
         self.feishu_config = feishu_config
+        self._feishu_base_url = "https://open.feishu.cn"
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.allowed_dirs = allowed_dirs
@@ -172,6 +173,11 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._approval_execution_tasks: set[asyncio.Task[None]] = set()
+        self._feishu_default_member_open_id = ""
+        if self.feishu_config and getattr(self.feishu_config, "allow_from", None):
+            allow_from_ids = extract_allow_from_open_ids(list(getattr(self.feishu_config, "allow_from", []) or []))
+            if allow_from_ids:
+                self._feishu_default_member_open_id = allow_from_ids[0]
         self._register_default_tools()
 
     @staticmethod
@@ -214,29 +220,16 @@ class AgentLoop:
             self.tools.register(CronTool(self.cron_service))
 
         fs_cfg = self.feishu_config
-        default_receive_id = ""
-        if fs_cfg and getattr(fs_cfg, "allow_from", None):
-            allow_from_ids = extract_allow_from_open_ids(list(getattr(fs_cfg, "allow_from", []) or []))
-            if allow_from_ids:
-                default_receive_id = allow_from_ids[0]
 
         # Message tool
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(
-            SpawnTool(
-                manager=self.subagents,
-                feishu_app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
-                feishu_app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-                feishu_default_member_open_id=default_receive_id,
-            )
-        )
 
         # Feishu file tool
         self.tools.register(
             FeishuSendFileTool(
                 app_id=getattr(fs_cfg, "app_id", "") if fs_cfg else "",
                 app_secret=getattr(fs_cfg, "app_secret", "") if fs_cfg else "",
-                default_receive_id=default_receive_id,
+                default_receive_id=self._feishu_default_member_open_id,
                 default_receive_id_type="open_id",
                 allowed_dir=allowed_dir,
             )
@@ -253,14 +246,6 @@ class AgentLoop:
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(channel, chat_id)
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(
-                channel,
-                chat_id,
-                sender_id,
-                session_key=session_key or f"{channel}:{chat_id}",
-            )
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(channel, chat_id)
@@ -276,6 +261,177 @@ class AgentLoop:
         feishu_file_tool = self.tools.get("feishu_send_file")
         if isinstance(feishu_file_tool, FeishuSendFileTool):
             feishu_file_tool.set_context(chat_id)
+
+    async def _open_sp_chat(
+        self,
+        *,
+        label: str | None,
+        origin_chat_id: str,
+        sender_id: str,
+        channel: str,
+        source_session: Session,
+    ) -> str:
+        """Fork the current Feishu session into a new subtask group chat."""
+        if channel != "feishu":
+            return "Error: /sp is only supported in Feishu chats."
+        app_id = str(getattr(self.feishu_config, "app_id", "") if self.feishu_config else "").strip()
+        app_secret = str(getattr(self.feishu_config, "app_secret", "") if self.feishu_config else "").strip()
+        if not app_id or not app_secret:
+            return "Error: Feishu credentials not configured for /sp (channels.feishu.app_id/app_secret)."
+
+        user_open_id = self._resolve_sp_user_open_id(sender_id)
+        if not user_open_id:
+            return (
+                "Error: Cannot determine Feishu user open_id for /sp. "
+                "Need current sender open_id or channels.feishu.allow_from[0]."
+            )
+
+        chat_name = self._build_sp_chat_name(label=label)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                token = await self._feishu_get_tenant_token(client, app_id=app_id, app_secret=app_secret)
+                chat = await self._feishu_create_chat(
+                    client=client,
+                    token=token,
+                    owner_open_id=user_open_id,
+                    name=chat_name,
+                    description=f"Spawned from {origin_chat_id}",
+                )
+                chat_id = str(chat.get("chat_id") or "").strip()
+                if not chat_id:
+                    raise RuntimeError("create chat succeeded but chat_id missing")
+                await self._feishu_add_members(client, token, chat_id, [user_open_id])
+        except Exception as e:
+            return f"Error creating Feishu subtask chat: {e}"
+
+        self._fork_session_context(
+            source_session=source_session,
+            target_session_key=f"feishu:{chat_id}",
+        )
+
+        logger.info(
+            "Opened Feishu subtask chat {} (origin={}, user={})",
+            chat_id,
+            origin_chat_id,
+            user_open_id,
+        )
+        return (
+            f"Created Feishu subtask chat `{chat_name}` ({chat_id}). "
+            "Please continue in that chat."
+        )
+
+    def _fork_session_context(self, *, source_session: Session, target_session_key: str) -> None:
+        """Clone full context (history + metadata) into the new chat session."""
+        target = self.sessions.rotate(target_session_key)
+        target.messages = copy.deepcopy(source_session.messages)
+        target.metadata = copy.deepcopy(source_session.metadata)
+        target.updated_at = datetime.now()
+        target._saved_message_count = 0
+        target._saved_state_fingerprint = ""
+        self.sessions.save(target)
+
+    def _resolve_sp_user_open_id(self, sender_id: str) -> str:
+        sender = str(sender_id or "").strip()
+        if sender.startswith("ou_"):
+            return sender
+        fallback = str(self._feishu_default_member_open_id or "").strip()
+        if fallback.startswith("ou_"):
+            return fallback
+        return ""
+
+    def _build_sp_chat_name(self, label: str | None) -> str:
+        seed = (label or "subtask").strip()
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", seed).strip("-").lower()
+        if not slug:
+            slug = "subtask"
+        slug = slug[:18].strip("-") or "subtask"
+        suffix = datetime.now().strftime("%H%M")
+        name = f"{self.agent_name}-{slug}-{suffix}"
+        return name[:30]
+
+    async def _feishu_get_tenant_token(self, client: httpx.AsyncClient, *, app_id: str, app_secret: str) -> str:
+        data = await self._feishu_request(
+            client=client,
+            method="POST",
+            path="/open-apis/auth/v3/tenant_access_token/internal",
+            json_body={"app_id": app_id, "app_secret": app_secret},
+        )
+        token = data.get("tenant_access_token")
+        if not token:
+            raise RuntimeError("tenant_access_token missing in response")
+        return str(token)
+
+    async def _feishu_create_chat(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        owner_open_id: str,
+        name: str,
+        description: str,
+    ) -> dict[str, Any]:
+        req_uuid = uuid.uuid4().hex
+        data = await self._feishu_request(
+            client=client,
+            method="POST",
+            path=f"/open-apis/im/v1/chats?user_id_type=open_id&uuid={req_uuid}",
+            token=token,
+            json_body={
+                "name": name,
+                "description": description[:200],
+                "owner_id": owner_open_id,
+                "chat_mode": "group",
+                "chat_type": "private",
+                "external": False,
+                "join_message_visibility": "all_members",
+                "leave_message_visibility": "all_members",
+                "membership_approval": "no_approval_required",
+            },
+        )
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def _feishu_add_members(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        chat_id: str,
+        member_open_ids: list[str],
+    ) -> None:
+        await self._feishu_request(
+            client=client,
+            method="POST",
+            path=f"/open-apis/im/v1/chats/{chat_id}/members?member_id_type=open_id&succeed_type=0",
+            token=token,
+            json_body={"id_list": member_open_ids},
+        )
+
+    async def _feishu_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        token: str | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = await client.request(
+            method=method,
+            url=f"{self._feishu_base_url}{path}",
+            json=json_body,
+            headers=headers,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if isinstance(data, dict) and data.get("code") == 0:
+            return data
+        code = data.get("code") if isinstance(data, dict) else None
+        msg = data.get("msg") if isinstance(data, dict) else None
+        log_id = data.get("log_id") if isinstance(data, dict) else None
+        tail = f", log_id={log_id}" if log_id else ""
+        raise RuntimeError(f"Feishu API {method} {path} failed: code={code}, msg={msg}{tail}")
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1063,7 +1219,6 @@ class AgentLoop:
         """Format tool calls as concise hints for channel progress messages."""
         preferred_keys_by_tool: dict[str, list[str]] = {
             "message": ["content", "chat_id", "channel"],
-            "spawn": ["label", "task"],
             "cron": ["action", "message", "cron_expr", "every_seconds", "at", "job_id"],
             "exec": ["command"],
             "read_file": ["path"],
@@ -1538,16 +1693,6 @@ class AgentLoop:
                         )
                         return final_content, tools_used, loop_meta
 
-                    if tool_call.name == "spawn" and not self._is_tool_error_result(result):
-                        final_content = (result or "").strip() or "Subtask started."
-                        history_messages.append({
-                            "role": "assistant",
-                            "content": final_content,
-                            "tools_used": tools_used if tools_used else None,
-                        })
-                        loop_meta = _build_loop_meta("spawn_finish")
-                        return final_content, tools_used, loop_meta
-
                     if consecutive_tool_errors >= self.max_consecutive_tool_errors:
                         final_content = self._build_incomplete_response(
                             reason="too many consecutive tool errors",
@@ -1842,18 +1987,8 @@ class AgentLoop:
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
-        metadata = msg.metadata or {}
-        session_meta_changed = False
-        if bool(metadata.get("_spawn_bootstrap")):
-            if not bool(session.metadata.get(self.SPAWN_CHILD_SESSION_METADATA_KEY)):
-                session.metadata[self.SPAWN_CHILD_SESSION_METADATA_KEY] = True
-                session_meta_changed = True
-        if session_meta_changed:
-            self.sessions.save(session)
-
-        is_subagent_session = bool(session.metadata.get(self.SPAWN_CHILD_SESSION_METADATA_KEY))
         self._set_tool_context(msg.channel, msg.chat_id, msg.sender_id, session_key=key)
-        disabled_tools = {"spawn"} if is_subagent_session else None
+        disabled_tools: set[str] | None = None
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.start_turn()
@@ -1968,14 +2103,13 @@ class AgentLoop:
                 content=f"User ID: `{msg.sender_id}`\nChat ID: `{msg.chat_id}`",
             )
         if cmd == "/sp":
-            spawn_tool = self.tools.get("spawn")
-            if not isinstance(spawn_tool, SpawnTool):
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="Error: spawn tool is not available.",
-                )
-            spawn_result = await spawn_tool.open_session(label=cmd_args or None)
+            spawn_result = await self._open_sp_chat(
+                label=cmd_args or None,
+                origin_chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                channel=msg.channel,
+                source_session=session,
+            )
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -2024,7 +2158,7 @@ class AgentLoop:
                 _resume_metadata,
             ) = restored
             if restored_disabled_tools is not None:
-                disabled_tools = restored_disabled_tools
+                disabled_tools = set(restored_disabled_tools)
 
         # Record raw inbound message for audit/replay and backfill older unsynced messages.
         self.channel_logs.append(

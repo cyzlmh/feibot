@@ -79,35 +79,11 @@ Skills with available="false" need dependencies installed first - you can try in
         
         return "\n\n---\n\n".join(parts)
     
-    @staticmethod
-    def _build_feishu_spawn_policy(channel: str | None, chat_id: str | None) -> str:
-        """Build per-chat spawn policy guidance for system prompt."""
-        if channel != "feishu" or not chat_id:
-            return ""
-        if chat_id.startswith("ou_"):
-            return (
-                "For the current Feishu direct chat (chat_id starts with `ou_`): "
-                "for anything beyond simple chat/intent recognition/short Q&A, call `spawn` early "
-                "and continue in the spawned chat. This includes web search, research/material "
-                "collation, video summarization, and concept learning tasks."
-            )
-        if chat_id.startswith("oc_"):
-            return (
-                "For the current Feishu group chat (chat_id starts with `oc_`): "
-                "do not auto-spawn unless the user explicitly asks (for example `/sp`)."
-            )
-        return (
-            "For the current Feishu chat: if chat type is unclear, avoid auto-spawn "
-            "unless the user explicitly asks."
-        )
-
     def _get_identity(self, channel: str | None = None, chat_id: str | None = None) -> str:
         """Get the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        spawn_policy = self._build_feishu_spawn_policy(channel, chat_id)
-        spawn_policy_text = f"\n{spawn_policy}" if spawn_policy else ""
         
         return f"""# feibot
 
@@ -129,7 +105,6 @@ Your workspace is at: {workspace_path}
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 For code explanation/debugging tasks, prefer find_file + grep_text + read_file before using exec.
 Use exec mainly for commands that cannot be done with dedicated tools.
-{spawn_policy_text}
 Use the current session history as your primary context.
 `memory/MEMORY.md` is preloaded into every prompt. Treat it as approved global memory only.
 Do not add anything to `memory/MEMORY.md` unless the user explicitly approves it.

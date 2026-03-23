@@ -77,7 +77,7 @@ async def test_go_command_reuses_persisted_resume_state_without_prompt_injection
         "reason": "max_iterations",
         "user_goal": "finish the work",
         "messages": resume_messages,
-        "disabled_tools": ["spawn"],
+        "disabled_tools": ["exec"],
     }
     loop.sessions.save(session)
 
@@ -110,7 +110,7 @@ async def test_go_command_reuses_persisted_resume_state_without_prompt_injection
     assert response.content == "resumed"
     assert seen["user_goal"] == "finish the work"
     assert seen["initial_messages"] == resume_messages
-    assert seen["disabled_tools"] == {"spawn"}
+    assert seen["disabled_tools"] == {"exec"}
 
 
 def test_incomplete_response_instructs_user_to_send_go(tmp_path: Path) -> None:

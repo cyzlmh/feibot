@@ -21,7 +21,7 @@ def test_build_messages_injects_runtime_context_as_untrusted_user_message(tmp_pa
     assert messages[2] == {"role": "user", "content": "hello"}
 
 
-def test_system_prompt_contains_only_direct_chat_spawn_policy_for_ou_chat(tmp_path: Path) -> None:
+def test_system_prompt_has_no_spawn_policy_for_ou_chat(tmp_path: Path) -> None:
     ctx = ContextBuilder(tmp_path)
     prompt = ctx.build_system_prompt(
         current_message="请帮我做个任务",
@@ -29,16 +29,11 @@ def test_system_prompt_contains_only_direct_chat_spawn_policy_for_ou_chat(tmp_pa
         chat_id="ou_12345",
     )
 
-    assert "Feishu direct chat" in prompt
-    assert "call `spawn` early" in prompt
-    assert "web search" in prompt
-    assert "research/material collation" in prompt
-    assert "video summarization" in prompt
-    assert "concept learning" in prompt
-    assert "Feishu group chat" not in prompt
+    assert "do not auto-spawn" not in prompt
+    assert "`/sp`" not in prompt
 
 
-def test_system_prompt_contains_only_group_chat_spawn_policy_for_oc_chat(tmp_path: Path) -> None:
+def test_system_prompt_has_no_spawn_policy_for_oc_chat(tmp_path: Path) -> None:
     ctx = ContextBuilder(tmp_path)
     prompt = ctx.build_system_prompt(
         current_message="请帮我做个任务",
@@ -46,9 +41,8 @@ def test_system_prompt_contains_only_group_chat_spawn_policy_for_oc_chat(tmp_pat
         chat_id="oc_12345",
     )
 
-    assert "Feishu group chat" in prompt
-    assert "do not auto-spawn unless the user explicitly asks" in prompt
-    assert "call `spawn` early" not in prompt
+    assert "do not auto-spawn" not in prompt
+    assert "`/sp`" not in prompt
 
 
 def test_system_prompt_preloads_long_term_memory(tmp_path: Path) -> None:
