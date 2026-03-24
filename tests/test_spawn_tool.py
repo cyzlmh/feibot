@@ -1,9 +1,6 @@
-import asyncio
-
 import pytest
 
 from feibot.agent.loop import AgentLoop
-from feibot.agent.subagent import SubagentManager
 from feibot.bus.events import InboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.providers.base import LLMProvider, LLMResponse
@@ -28,33 +25,6 @@ class _FakeProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "fake-model"
-
-
-@pytest.mark.asyncio
-async def test_subagent_manager_announces_result_to_bus(tmp_path):
-    provider = _FakeProvider(LLMResponse(content="Background check complete."))
-    bus = MessageBus()
-    mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=bus)
-
-    ack = await mgr.spawn(
-        task="Check the workspace and report.",
-        label="workspace-check",
-        origin_channel="feishu",
-        origin_chat_id="oc_chat_456",
-    )
-    assert "started" in ack.lower()
-
-    running = list(mgr._running_tasks.values())
-    assert len(running) == 1
-    await asyncio.wait_for(running[0], timeout=2.0)
-
-    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=2.0)
-    assert msg.channel == "system"
-    assert msg.chat_id == "feishu:oc_chat_456"
-    assert msg.sender_id == "subagent"
-    assert "workspace-check" in msg.content
-    assert "Background check complete." in msg.content
-    assert msg.metadata.get("_suppress_progress") is True
 
 
 @pytest.mark.asyncio

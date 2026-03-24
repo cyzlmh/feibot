@@ -20,7 +20,6 @@ from feibot.agent.exec_approval import (
     ExecApprovalResolution,
 )
 from feibot.agent.memory import MemoryStore
-from feibot.agent.subagent import SubagentManager
 from feibot.agent.tools.cron import CronTool
 from feibot.agent.tools.feishu import FeishuSendFileTool
 from feibot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -152,19 +151,6 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace / "sessions")
         self.channel_logs = ChannelLogStore(workspace / "logs")
         self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
-            bus=bus,
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            brave_api_key=brave_api_key,
-            skills_env=self.skills_env,
-            exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
-            agent_name=self.agent_name,
-        )
 
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}
@@ -1789,7 +1775,7 @@ class AgentLoop:
                 )
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
-        """Cancel all active tasks and subagents for the session."""
+        """Cancel all active tasks for the session."""
         tasks = self._active_tasks.pop(msg.session_key, [])
         approval_tasks = [
             task
@@ -1808,8 +1794,7 @@ class AgentLoop:
         if lock is not None and not lock.locked():
             self._prune_session_lock(msg.session_key, lock)
 
-        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
-        total = cancelled + sub_cancelled
+        total = cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(
             OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
@@ -1997,12 +1982,10 @@ class AgentLoop:
         cmd, cmd_args = self._parse_command(msg.content)
         resume_state = self._get_resume_state(session)
         if cmd == "/stop":
-            sub_cancelled = await self.subagents.cancel_by_session(key)
-            content = f"⏹ Stopped {sub_cancelled} task(s)." if sub_cancelled else "No active task to stop."
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=content,
+                content="No active task to stop.",
             )
         if cmd == "/approve":
             is_card_action = str((msg.metadata or {}).get("source") or "") == "card_action"

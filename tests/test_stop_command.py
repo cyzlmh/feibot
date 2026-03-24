@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from feibot.agent.loop import AgentLoop
-from feibot.agent.subagent import SubagentManager
 from feibot.bus.events import InboundMessage, OutboundMessage
 from feibot.bus.queue import MessageBus
 from feibot.providers.base import LLMProvider, LLMResponse
@@ -13,15 +12,6 @@ from feibot.providers.base import LLMProvider, LLMResponse
 class DummyProvider(LLMProvider):
     async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         return LLMResponse(content="unused")
-
-    def get_default_model(self) -> str:
-        return "dummy/test-model"
-
-
-class SlowProvider(LLMProvider):
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
-        await asyncio.sleep(30)
-        return LLMResponse(content="done")
 
     def get_default_model(self) -> str:
         return "dummy/test-model"
@@ -42,27 +32,6 @@ def _make_loop(tmp_path: Path, bus: MessageBus | None = None) -> AgentLoop:
         model="dummy/test-model",
         memory_window=20,
     )
-
-
-@pytest.mark.asyncio
-async def test_subagent_manager_cancel_by_session(tmp_path: Path) -> None:
-    bus = MessageBus()
-    manager = SubagentManager(provider=SlowProvider(), workspace=tmp_path, bus=bus)
-
-    ack = await manager.spawn(
-        task="long running task",
-        origin_channel="feishu",
-        origin_chat_id="oc_task",
-        session_key="feishu:oc_task",
-    )
-    assert "started" in ack.lower()
-
-    await asyncio.sleep(0.05)
-    cancelled = await manager.cancel_by_session("feishu:oc_task")
-
-    assert cancelled == 1
-    assert manager.get_running_count() == 0
-    assert "feishu:oc_task" not in manager._session_tasks
 
 
 @pytest.mark.asyncio
