@@ -66,6 +66,7 @@ MAX_MERGE_FORWARD_PREVIEW_ITEMS = 6
 MAX_MERGE_FORWARD_LINE_CHARS = 240
 MARKDOWN_FILE_CHAR_THRESHOLD = 3200
 MARKDOWN_FILE_TABLE_THRESHOLD = 5
+PROGRESS_ECHO_MAX_CHARS = 3200
 _MARKDOWN_TABLE_ROW_RE = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
 _MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^[ \t]*\|(?:\s*:?-{3,}:?\s*\|)+[ \t]*$")
 
@@ -669,8 +670,19 @@ class FeishuChannel(BaseChannel):
 
         receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        content = str(msg.content or "")
         custom_card = metadata.get("_feishu_card")
         explicit_msg_type = str(metadata.get("_feishu_msg_type") or "").strip().lower()
+        is_tool_hint = bool(metadata.get("_tool_hint"))
+        is_progress = bool(metadata.get("_progress"))
+
+        if (is_tool_hint or is_progress) and len(content) > PROGRESS_ECHO_MAX_CHARS:
+            logger.info(
+                "Feishu progress/tool-hint truncated: original_chars={}, max_chars={}",
+                len(content),
+                PROGRESS_ECHO_MAX_CHARS,
+            )
+            content = content[:PROGRESS_ECHO_MAX_CHARS]
 
         if isinstance(custom_card, dict):
             card = self._normalize_card_payload(custom_card)
@@ -679,7 +691,7 @@ class FeishuChannel(BaseChannel):
                 receive_id=chat_id,
                 msg_type="interactive",
                 content=json.dumps(card, ensure_ascii=False),
-                original_content=msg.content,
+                original_content=content,
             )
             return
 
@@ -688,8 +700,8 @@ class FeishuChannel(BaseChannel):
                 receive_id_type=receive_id_type,
                 receive_id=chat_id,
                 msg_type="text",
-                content=json.dumps({"text": str(msg.content or "")}, ensure_ascii=False),
-                original_content=msg.content,
+                content=json.dumps({"text": content}, ensure_ascii=False),
+                original_content=content,
             )
             return
 
@@ -698,15 +710,15 @@ class FeishuChannel(BaseChannel):
                 receive_id_type=receive_id_type,
                 receive_id=chat_id,
                 msg_type="post",
-                content=self._build_post_message_content(msg.content),
-                original_content=msg.content,
+                content=self._build_post_message_content(content),
+                original_content=content,
             )
             return
 
-        # Tool hints should never be sent as files
-        is_tool_hint = bool(metadata.get("_tool_hint"))
-        prefer_file, content_len, table_count = self._should_prefer_markdown_file(msg.content)
-        if prefer_file and not is_tool_hint:
+        # Progress/tool-hint echoes should never be sent as files.
+        # They are transient status messages rather than durable deliverables.
+        prefer_file, content_len, table_count = self._should_prefer_markdown_file(content)
+        if prefer_file and not is_tool_hint and not is_progress:
             logger.info(
                 "Feishu outbound uses markdown-file mode: chars={}, tables={}",
                 content_len,
@@ -715,7 +727,7 @@ class FeishuChannel(BaseChannel):
             file_ok, file_reason = await self._send_markdown_file_message(
                 receive_id_type=receive_id_type,
                 receive_id=chat_id,
-                content=msg.content,
+                content=content,
             )
             if file_ok:
                 logger.debug(f"Feishu markdown file message sent to {msg.chat_id}")
@@ -724,13 +736,13 @@ class FeishuChannel(BaseChannel):
             self._send_text_fallback(
                 receive_id_type=receive_id_type,
                 receive_id=chat_id,
-                original_content=msg.content,
+                original_content=content,
                 reason=f"markdown file send failed: {file_reason}",
             )
             return
 
         # Build a simple markdown card to avoid unsupported legacy tags on JSON 2.0.
-        elements = self._build_card_elements(msg.content)
+        elements = self._build_card_elements(content)
         card = self._normalize_card_payload({
             "config": {"width_mode": "fill", "update_multi": True},
             "body": {"elements": elements},
@@ -740,7 +752,7 @@ class FeishuChannel(BaseChannel):
             receive_id=chat_id,
             msg_type="interactive",
             content=json.dumps(card, ensure_ascii=False),
-            original_content=msg.content,
+            original_content=content,
         )
     
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:

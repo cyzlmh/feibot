@@ -707,3 +707,120 @@ async def test_send_markdown_file_failure_falls_back_to_text_without_interactive
     assert "Delivery warning" in text
     assert "markdown file send failed" in text
     assert "upload failed" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"_tool_hint": True},
+        {"_progress": True},
+        {"_progress": True, "_tool_hint": True},
+    ],
+)
+async def test_send_progress_or_tool_hint_never_uses_markdown_file(
+    monkeypatch,
+    tmp_path: Path,
+    metadata: dict[str, object],
+) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+    markdown_calls = 0
+
+    async def _fake_send_markdown_file_message(**kwargs):
+        nonlocal markdown_calls
+        markdown_calls += 1
+        return True, ""
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        return _SendResponse(True, code=0, msg="ok", log_id="log_interactive_progress_1")
+
+    monkeypatch.setattr(channel, "_send_markdown_file_message", _fake_send_markdown_file_message)
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content=_markdown_tables(5),
+            metadata=metadata,
+        )
+    )
+
+    assert markdown_calls == 0
+    assert len(calls) == 1
+    body = calls[0]["request_body"]
+    assert isinstance(body, dict)
+    assert body["msg_type"] == "interactive"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"_tool_hint": True},
+        {"_progress": True},
+        {"_progress": True, "_tool_hint": True},
+    ],
+)
+async def test_send_progress_or_tool_hint_truncates_to_3200_chars(
+    monkeypatch,
+    tmp_path: Path,
+    metadata: dict[str, object],
+) -> None:
+    channel = _make_channel(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    def _fake_create(request: dict[str, object]) -> _SendResponse:
+        calls.append(request)
+        return _SendResponse(True, code=0, msg="ok", log_id="log_interactive_progress_2")
+
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequestBody",
+        SimpleNamespace(builder=lambda: _ReqBodyBuilder()),
+    )
+    monkeypatch.setattr(
+        "feibot.channels.feishu.CreateMessageRequest",
+        SimpleNamespace(builder=lambda: _ReqBuilder()),
+    )
+    channel._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(create=_fake_create)))
+    )
+
+    long_text = "x" * 4000
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="oc_group_1",
+            content=long_text,
+            metadata=metadata,
+        )
+    )
+
+    assert len(calls) == 1
+    body = calls[0]["request_body"]
+    assert isinstance(body, dict)
+    assert body["msg_type"] == "interactive"
+
+    payload = json.loads(str(body["content"]))
+    assert isinstance(payload, dict)
+    card_body = payload.get("body")
+    assert isinstance(card_body, dict)
+    elements = card_body.get("elements")
+    assert isinstance(elements, list) and elements
+    first = elements[0]
+    assert isinstance(first, dict)
+    sent_text = str(first.get("content") or "")
+    assert len(sent_text) == 3200
+    assert sent_text == long_text[:3200]
