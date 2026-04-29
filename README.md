@@ -1,211 +1,248 @@
 # feibot
 
-> 基于 nanobot 深度定制的飞书专属 AI 助手。
+> A lightweight multi-agent AI assistant framework with orchestration control plane.
 
 ---
 
-## ✨ 核心特性
+## Overview
 
-### 1. 工具调用提示
+Feibot is a personal AI assistant framework designed for running multiple specialized agents with unified lifecycle management. It features:
 
-显示正在调用的工具名称。
+- **Madame Control Plane**: Orchestrate multiple agent instances with credential pools, skill sharing, and lifecycle control
+- **20+ LLM Providers**: Auto-detected by model name (Anthropic, OpenAI, DeepSeek, MiniMax, Gemini, etc.)
+- **CLI Interactive Mode**: Local terminal chat without messaging platform dependency
+- **General-purpose Tools**: Filesystem, shell execution, web search/fetch, scheduling
+- **Skill-based Extensions**: Modular skill system for domain-specific workflows
+
+---
+
+## Architecture
 
 ```
-🔧 调用：list_dir(path=".")
-```
-
----
-
-### 2. 任务控制
-
-| 命令 | 说明 |
-|------|------|
-| `/stop` | 取消当前任务 |
-| `/go` | 继续因中断暂停的任务 |
-| `/new` | 开启新会话 |
-
----
-
-### 3. 子任务命令
-
-| 命令 | 说明 |
-|------|------|
-| `/fork <任务>` | 带完整上下文的子任务，创建独立飞书群聊 |
-| `/spawn <任务>` | 空上下文的子任务，创建独立飞书群聊 |
-
-示例：
-```
-用户：/fork 分析代码并生成报告
-🤖 创建群聊：任务-代码分析报告
-
-用户：/spawn 用 Python 实现快速排序
-🤖 创建群聊：任务-快速排序实现
-```
-
----
-
-### 4. 工具调用一致性校验
-
-防止历史截断导致工具调用断裂。
-
----
-
-### 5. 工具安全模型
-
-执行工具只保留两条基础约束：
-- `tools.writableDirs`：允许修改的本地目录
-- `tools.allowedHosts`：允许远程连接的主机
-
-文件默认可读；不在 `writableDirs` 里的路径不可写。
-
-Madame agent 可配置显式工具白名单 (`tools.allowedTools`)。
-
----
-
-### 6. 操作日志与消息去重
-
-按会话存储原始消息 (JSONL)，支持：
-- 消息去重（防止重复处理）
-- 会话恢复与历史重建
-
-```
-workspace/logs/feishu_oc_xxx.jsonl
+┌─────────────────────────────────────────────────────────────────┐
+│                      Madame Control Plane                        │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Registry Store  │  Credential Pool  │  Skill Hub           ││
+│  │  (agents.json)   │  (app credentials)│  (shared skills)     ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│         ┌────────────────────┼────────────────────┐             │
+│         ▼                    ▼                    ▼             │
+│   ┌──────────┐         ┌──────────┐         ┌──────────┐       │
+│   │ Agent A  │         │ Agent B  │         │ Agent C  │       │
+│   │ (coder)  │         │ (chat)   │         │(research)│       │
+│   └──────────┘         └──────────┘         └──────────┘       │
+│         │                    │                    │             │
+└─────────┼────────────────────┼────────────────────┼─────────────┘
+          │                    │                    │
+          ▼                    ▼                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Agent Loop Core                            │
+│  ┌─────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐    │
+│  │ Context     │ │ Session  │ │ Memory   │ │ Skill Loader │    │
+│  │ Builder     │ │ Manager  │ │ Store    │ │              │    │
+│  └─────────────┘ └──────────┘ └──────────┘ └──────────────┘    │
+│                              │                                   │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     Tool Registry                          │ │
+│  │  read │ write │ edit │ list │ find │ grep │ exec │ web │  │ │
+│  │  cron │ message │ feishu_send_file                         │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                   │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                    LLM Provider                            │ │
+│  │  Anthropic │ OpenAI │ DeepSeek │ MiniMax │ Gemini │ ...   │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        Channels                                  │
+│  ┌──────────────┐  ┌──────────────┐                             │
+│  │ Feishu/Lark  │  │ CLI Terminal │                             │
+│  │ WebSocket    │  │ Interactive  │                             │
+│  └──────────────┘  └──────────────┘                             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### 7. 强制配置文件
+## Core Features
 
-必须指定配置文件启动。
+### 1. Madame Multi-Agent Orchestration
+
+Madame is the control plane for managing multiple specialized agent instances:
+
+| Command | Description |
+|---------|-------------|
+| `/agent list` | List all managed agents (Markdown table) |
+| `/agent create --name <id> --mode <agent|chat>` | Create new agent |
+| `/agent start|stop|restart <id>` | Lifecycle control |
+| `/agent restart all` | Bulk restart active agents |
+| `/agent archive <id>` | Archive agent, backup workspace, release credential |
+| `/agent pool list|add|remove` | Manage credential pool |
+| `/agent cron <list|add|runs|remove|enable|disable|run>` | Scheduled jobs per agent |
+| `/agent skills hub list|find|install|uninstall` | Shared skill library |
+| `/skill list|show|add|remove|sync|clear` | Agent skill assignment |
+
+**Agent Modes:**
+- `agent`: Full tool access, skills enabled, memory enabled
+- `chat`: Minimal tools (web_search, web_fetch only), no skills, no memory
+
+**Credential Pool:** Dynamic pool of Feishu app credentials for agent allocation.
+
+### 2. LLM Provider Ecosystem
+
+Auto-detects provider by model name prefix. Supports **20+ providers**:
+
+| Provider | Model Keywords | Default Base URL |
+|----------|----------------|------------------|
+| Anthropic | `anthropic`, `claude` | Native SDK |
+| OpenAI | `openai`, `gpt` | SDK default |
+| DeepSeek | `deepseek` | `https://api.deepseek.com` |
+| Gemini | `gemini` | Google Generative AI API |
+| Zhipu | `zhipu`, `glm` | `https://open.bigmodel.cn/api/paas/v4` |
+| MiniMax | `minimax` | `https://api.minimax.io/v1` |
+| Moonshot | `moonshot`, `kimi` | `https://api.moonshot.ai/v1` |
+| DashScope | `qwen`, `dashscope` | Alibaba Cloud |
+| Mistral | `mistral` | `https://api.mistral.ai/v1` |
+| Groq | `groq` | `https://api.groq.com/openai/v1` |
+
+**Gateways:**
+- OpenRouter, AiHubMix, SiliconFlow, VolcEngine, BytePlus
+
+**Local Deployment:**
+- vLLM, Ollama, OpenVINO Model Server
+
+**OAuth Providers:**
+- OpenAI Codex (ChatGPT backend)
+- GitHub Copilot
+
+### 3. CLI Interactive Mode
+
+Run agent locally without messaging platform:
 
 ```bash
-python -m feibot.gateway --config config.json
-```
-
----
-
-### 8. 飞书 Wiki 知识库
-
-支持 Wiki 空间/节点管理。
-
-```python
-feishu_wiki spaces
-feishu_wiki nodes <space_id>
-feishu_wiki create/move/rename
-```
-
----
-
-### 9. 飞书多维表格 (Bitable)
-
-完整 CRUD 操作。
-
-```python
-feishu_bitable_list_records
-feishu_bitable_create_record
-feishu_bitable_update_record
-feishu_bitable_create_app
-```
-
----
-
-### 10. 飞书云盘
-
-文件管理能力。
-
-```python
-feishu_drive list/create_folder/move/delete
-```
-
----
-
-### 11. Madame 控制平面
-
-Madame 是唯一的 agent 管理入口，统一负责：
-
-- **生命周期管理**：`/agent create|start|stop|restart|archive`
-- **运行状态可见**：`/agent list`（Markdown 表格）、`/agent status <id>`
-- **动态凭据池**：按 `name -> app_id/app_secret` 维护
-- **Cron 定时任务**：`/agent cron list|add|runs|remove|enable|disable|run`
-- **技能治理**：`/agent skills list|install|remove`，共享技能池
-- **隔离策略**：`chat` 模式最小化提示词、禁用 skills/memory
-
----
-
-### 12. 多渠道支持
-
-| 渠道 | 状态 |
-|------|------|
-| 飞书 (Feishu/Lark) | ✅ 主要渠道 |
-| WeChat (ilink API) | ✅ 实验性 |
-| CLI 交互模式 | ✅ 本地测试 |
-
----
-
-### 13. 原生 Provider 系统
-
-支持多 LLM Provider，自动按 model 字符串匹配：
-
-- Anthropic Claude
-- OpenAI / Azure OpenAI / OpenAI Codex OAuth
-- MiniMax
-- DashScope (阿里云)
-- Groq
-- vLLM / Ollama (本地部署)
-
----
-
-## 🚀 快速开始
-
-### 安装
-
-```bash
-# 本地开发
-uv sync
-
-# 运行
-uv run python -m feibot.gateway --config ./config.json
-
-# CLI 交互模式
+# Interactive chat
 uv run python -m feibot
+
+# Single message
+uv run python -m feibot -m "Explain Python async/await"
+
+# With config
+uv run python -m feibot --config ./config.json
 ```
 
-### Madame 初始化（推荐）
+Features: prompt_toolkit with history, streaming responses, Markdown rendering.
+
+### 4. General-Purpose Tools
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents (truncated at 128KB) |
+| `write_file` | Write/create files (creates parent dirs) |
+| `edit_file` | Replace text in existing file |
+| `list_dir` | List directory contents |
+| `find_file` | Find files by name (uses `fd`) |
+| `grep_text` | Search text patterns (uses `rg`) |
+| `exec` | Execute shell commands (timeout, host guards) |
+| `web_search` | Tavily API search |
+| `web_fetch` | Fetch and extract readable content from URL |
+| `cron` | Schedule tasks (intervals, cron expressions) |
+| `message` | Send messages via channel |
+| `feishu_send_file` | Upload files to Feishu |
+
+**Security Model:**
+- `writableDirs`: Allowed write paths
+- `allowedHosts`: Allowed remote hosts for SSH/SCP/RSYNC
+- Files read-only by default; shell timeout configurable
+
+### 5. Built-in Skills
+
+| Skill | Description |
+|-------|-------------|
+| `memory` | Two-layer memory (MEMORY.md + HISTORY.md) |
+| `cron` | Deterministic scheduled tasks |
+| `heartbeat` | Ad-hoc review queue in HEARTBEAT.md |
+| `github` | GitHub CLI (`gh`) for issues, PRs, CI |
+| `agent-browser` | Browser automation |
+| `tmux` | Remote-control tmux sessions |
+| `summarize` | Summarize URLs, files, YouTube videos |
+| `weather` | Weather info via wttr.in |
+| `skill-creator` | Create new skills |
+| `feishu-file-send` | Send files via Feishu |
+| `feibot-ops` | Lifecycle operations via launchd/systemd |
+
+### 6. Session & Memory
+
+**Session Storage:**
+- JSONL append-only archives: `sessions/YYYY/MM/DD/<session_id>.jsonl`
+- Active session index for routing
+- Message deduplication to prevent reprocessing
+
+**Memory Layers:**
+- `MEMORY.md`: Approved long-term facts (always loaded)
+- `HISTORY.md`: Session summaries (grep-searchable)
+
+### 7. Scheduling
+
+**Cron Service:**
+- `every`: Interval-based (e.g., every 30 minutes)
+- `cron`: Cron expression with timezone
+- `at`: One-shot timestamp
+
+**Heartbeat Service:**
+- Periodic review of HEARTBEAT.md (default: 30 min)
+- LLM decides whether tasks are actionable
+
+---
+
+## Quick Start
+
+### Install
 
 ```bash
-# 1) 初始化 Madame
+uv sync
+```
+
+### Run CLI Mode
+
+```bash
+uv run python -m feibot --config ./config.json
+```
+
+### Run Gateway (Feishu)
+
+```bash
+uv run python -m feibot.gateway --config ./config.json
+```
+
+### Bootstrap Madame
+
+```bash
 uv run feibot madame init \
   --repo-dir ~/Projects/feibot \
   --madame-dir ~/madame \
   --app-id <MADAME_APP_ID> \
   --app-secret <MADAME_APP_SECRET> \
   --pool-slot "Agent1=<APP_ID>:<APP_SECRET>"
+```
 
-# 2) 启动 Madame gateway（macOS launchd）
+Then start Madame gateway:
+```bash
 ~/madame/ops/manage.sh install
-
-# 3) 后续管理统一走聊天内 /agent 命令
+~/madame/ops/manage.sh start
 ```
 
-### 在对话中使用
+---
 
-```
-/agent pool list
-/agent create --name "Agent1" --mode agent
-/agent create --name "ChatBot" --mode chat
-/agent start|stop|restart <runtime_id>
-/agent archive <runtime_id>
-/agent list
-/agent status <runtime_id>
-/agent cron list|add|runs|remove|enable|disable|run ...
-/agent skills list|install|remove ...
-```
+## Configuration
 
-### 最小配置
+### Minimal Config
 
 ```json
 {
-  "name": "feibot",
+  "name": "my-agent",
   "paths": {
     "workspace": "./workspace",
     "sessions": "./sessions"
@@ -216,71 +253,114 @@ uv run feibot madame init \
     }
   },
   "channels": {
+    "send_progress": true,
+    "send_tool_hints": true,
     "feishu": {
-      "enabled": true,
-      "appId": "cli_xxx",
-      "appSecret": "xxx",
-      "allowFrom": ["ou_xxx"]
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allow_from": []
+    }
+  },
+  "providers": {
+    "openai": {
+      "api_key": "<OPENAI_API_KEY>"
     }
   },
   "tools": {
     "writableDirs": ["./workspace"],
     "allowedHosts": [],
     "exec": {
-      "timeout": 300,
-      "pathAppend": ""
+      "timeout": 300
     }
+  },
+  "madame": {
+    "enabled": false
+  }
+}
+```
+
+### Madame Config
+
+```json
+{
+  "madame": {
+    "enabled": true,
+    "runtime_id": "madame",
+    "registry_path": "~/madame/agents_registry.json",
+    "manage_script": "~/madame/ops/manage.sh",
+    "base_dir_template": "~/madame/agents/{runtime_id}",
+    "backup_dir": "~/madame/backups"
   }
 }
 ```
 
 ---
 
-## 📊 与 nanobot 的差异
+## Agent Registry Structure
 
-| 特性 | nanobot | feibot |
-|------|---------|--------|
-| 定位 | 多平台通用 | 飞书为主 |
-| 工具提示 | ❌ | ✅ |
-| 任务取消 | ❌ | ✅ `/stop` |
-| 任务继续 | ❌ | ✅ `/go` |
-| 子任务 | ❌ | ✅ `/fork` `/spawn` |
-| 工具一致性校验 | ❌ | ✅ |
-| 执行审批 | ❌ | ✅ (已简化) |
-| 操作日志 | ❌ | ✅ |
-| 消息去重 | ❌ | ✅ |
-| 强制配置 | ❌ | ✅ |
-| 飞书 Wiki | ❌ | ✅ |
-| 飞书 Bitable | ❌ | ✅ |
-| 飞书云盘 | ❌ | ✅ |
-| 多 Agent 管理 | ❌ | ✅ Madame |
-| Cron 定时任务 | ❌ | ✅ |
-| 技能共享池 | ❌ | ✅ |
-| 原生 Provider | ❌ | ✅ |
-
----
-
-## 开发版本控制
-
-版本号格式：`{major}.{minor}.{patch}-dev+{git_hash}`
-
-| 变更类型 | 操作 | 示例 |
-|----------|------|------|
-| Bug 修复 | patch +1 | 0.1.4 → 0.1.5 |
-| 新功能 | minor +1 | 0.1.4 → 0.2.0 |
-| 重大变更 | major +1 | 0.1.4 → 1.0.0 |
-
-### 发布流程
-
-1. 更新 `pyproject.toml` 中的版本号
-2. 提交代码：`git commit -m "release: v0.1.5"`
-3. 打标签：`git tag v0.1.5`
-4. 推送：`git push && git push --tags`
+```json
+{
+  "version": 3,
+  "credential_pool": [
+    {
+      "display_name": "Agent1",
+      "app_id": "cli_xxx",
+      "app_secret": "sec_xxx",
+      "status": "available",
+      "assigned_runtime_id": ""
+    }
+  ],
+  "agents": [
+    {
+      "runtime_id": "agent1",
+      "display_name": "Agent1",
+      "mode": "agent",
+      "role": "coder",
+      "launchd_label": "ai.agent1.gateway",
+      "config_path": "~/madame/agents/agent1/config.json",
+      "workspace_path": "~/madame/agents/agent1/workspace",
+      "skills": ["github", "cron"],
+      "tool_policy": "default",
+      "archived": false
+    }
+  ]
+}
+```
 
 ---
 
-## 📄 License
+## In-Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start fresh session |
+| `/stop` | Cancel current task |
+| `/go` | Resume paused task |
+| `/fork [label]` | Subtask with context (creates Feishu group) |
+| `/spawn [label]` | Subtask fresh context (creates Feishu group) |
+| `/agent ...` | Madame control commands |
+| `/skill ...` | Agent skill management |
+| `/help` | Show available commands |
+| `/chatid` | Show current chat ID |
+
+---
+
+## Project Stats
+
+| Component | Lines |
+|-----------|-------|
+| Agent Loop Core | ~2000 |
+| Madame Controller | ~1800 |
+| Providers Registry | ~660 |
+| Cron Service | ~670 |
+| Feishu Channel | ~1300 |
+| CLI Commands | ~1000 |
+
+---
+
+## License
 
 MIT
 
-基于 [nanobot](https://github.com/HKUDS/nanobot) 深度定制
+Based on [nanobot](https://github.com/HKUDS/nanobot) framework.
