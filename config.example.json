@@ -1,0 +1,83 @@
+{
+  "name": "<name>",
+  "paths": {
+    "workspace": "./workspace",
+    "sessions": "./sessions"
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.5",
+      "provider": "auto",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 100,
+      "maxConsecutiveToolErrors": 10,
+      "memoryWindow": 50,
+      "reasoningEffort": "",
+      "disableTools": false,
+      "disableSkills": false,
+      "disableLongTermMemory": false
+    }
+  },
+  "providers": {
+    "minimax": {
+      "apiKey": "<MINIMAX_API_KEY>",
+      "apiBase": "https://api.minimaxi.com/v1",
+      "extraHeaders": null
+    },
+    "openaiCodex": {}
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "<FEISHU_APP_ID>",
+      "appSecret": "<FEISHU_APP_SECRET>",
+      "encryptKey": "",
+      "verificationToken": "",
+      "wikiSpaceId": "",
+      "wikiParentNodeToken": "",
+      "docWriteAutoChunkThresholdChars": 6000,
+      "allowFrom": [
+        "<FEISHU_USER_OPEN_ID>:<PHONE_NUMBER>"
+      ]
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "<TAVILY_API_KEY>",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 300,
+      "pathAppend": ""
+    },
+    "writableDirs": ["./workspace"],
+    "allowedHosts": []
+  },
+  "skills": {
+    "env": {
+      "OPENAI_API_KEY": "<OPENAI_API_KEY>",
+      "OPENAI_BASE_URL": "https://api.openai.com/v1",
+      "VISION_API_KEY": "<MINIMAX_API_KEY>",
+      "VISION_BASE_URL": "https://api.minimaxi.com/v1",
+      "VISION_MODEL": "MiniMax-M2.7",
+      "IMAGEGEN_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+      "IMAGEGEN_API_KEY": "<OPENROUTER_API_KEY>",
+      "IMAGEGEN_MODEL": "bytedance-seed/seedream-4.5",
+      "TEXTGEN_API_KEY": "<MINIMAX_API_KEY>",
+      "TEXTGEN_BASE_URL": "https://api.minimaxi.com/v1",
+      "TEXTGEN_MODEL": "MiniMax-M2.7"
+    }
+  },
+  "madame": {
+    "enabled": false,
+    "runtimeId": "madame",
+    "registryPath": "./workspace/madame/agents_registry.json",
+    "manageScript": "",
+    "baseDirTemplate": "./agents/{runtime_id}",
+    "backupDir": "./backups",
+    "enforceIsolation": true
+  }
+}

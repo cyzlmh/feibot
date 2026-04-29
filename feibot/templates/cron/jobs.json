@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "default-nightly-reflection",
+      "name": "nightly-reflection-report",
+      "enabled": true,
+      "schedule": {
+        "kind": "cron",
+        "atMs": null,
+        "everyMs": null,
+        "expr": "0 4 * * *",
+        "tz": null
+      },
+      "payload": {
+        "kind": "system_event",
+        "message": "history_sync",
+        "notifyPolicy": "always",
+        "notifyOnError": true,
+        "channel": null,
+        "to": null
+      },
+      "state": {
+        "runningAtMs": null,
+        "nextRunAtMs": null,
+        "lastRunAtMs": null,
+        "lastDurationMs": null,
+        "runStatus": null,
+        "businessStatus": null,
+        "deliveryStatus": null,
+        "lastError": null,
+        "lastDeliveryError": null,
+        "lastFingerprint": null,
+        "consecutiveErrors": 0
+      },
+      "createdAtMs": 0,
+      "updatedAtMs": 0,
+      "deleteAfterRun": false
+    }
+  ]
+}

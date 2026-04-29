@@ -1,0 +1,90 @@
+[project]
+name = "feibot-ai"
+version = "0.1.4"
+description = "A lightweight personal AI assistant framework"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "feibot contributors"}
+]
+keywords = ["ai", "agent", "chatbot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "typer>=0.9.0",
+    "anthropic>=0.45.0,<1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "websockets>=12.0",
+    "websocket-client>=1.6.0",
+    "httpx[socks]>=0.25.0",
+    "loguru>=0.7.0",
+    "readability-lxml>=0.8.0",
+    "rich>=13.0.0",
+    "lark-oapi>=1.0.0",
+    "prompt-toolkit>=3.0.0",
+    "croniter>=6.0.0,<7.0.0",
+    "openai>=2.8.0",
+    "json-repair>=0.57.0,<1.0.0",
+    "oauth-cli-kit>=0.1.3,<1.0.0",
+    "gmssl>=3.2.2",
+    "qrcode>=7.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+feibot = "feibot.cli.commands:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["feibot"]
+
+[tool.hatch.build.targets.wheel.sources]
+"feibot" = "feibot"
+
+# Include non-Python files in skills
+[tool.hatch.build]
+include = [
+    "feibot/**/*.py",
+    "feibot/templates/**/*.md",
+    "feibot/skills/**/*.md",
+    "feibot/skills/**/*.sh",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "feibot/",
+
+    "README.md",
+    "LICENSE",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

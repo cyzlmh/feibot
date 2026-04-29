@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "updated_at": "2026-03-24T00:00:00Z",
+  "credential_pool": [
+    {
+      "display_name": "Candy Cat",
+      "app_id": "cli_xxx_candy",
+      "app_secret": "sec_xxx_candy",
+      "status": "available",
+      "assigned_runtime_id": ""
+    },
+    {
+      "display_name": "Zoe Zebra",
+      "app_id": "cli_xxx_zoe",
+      "app_secret": "sec_xxx_zoe",
+      "status": "assigned",
+      "assigned_runtime_id": "zoe-zebra-20260324000100"
+    }
+  ],
+  "agents": [
+    {
+      "runtime_id": "madame",
+      "display_name": "Madame",
+      "mode": "agent",
+      "role": "manager",
+      "profile": "manager",
+      "launchd_label": "ai.madame.gateway",
+      "config_path": "/path/to/madame/config.json",
+      "workspace_path": "/path/to/madame/workspace",
+      "sessions_path": "/path/to/madame/sessions",
+      "run_dir": "/path/to/madame/run",
+      "slot_name": "",
+      "app_id": "cli_xxx_madame",
+      "app_secret": "sec_xxx_madame",
+      "archived": false,
+      "archived_at": "",
+      "backup_path": "",
+      "skills": [
+        "feibot-ops"
+      ],
+      "tool_policy": "madame_only",
+      "memory_mode": "default",
+      "skill_mode": "default"
+    },
+    {
+      "runtime_id": "zoe-zebra-20260324000100",
+      "display_name": "Zoe Zebra",
+      "mode": "agent",
+      "role": "agent",
+      "profile": "agent",
+      "launchd_label": "ai.zoe-zebra-20260324000100.gateway",
+      "config_path": "/path/to/zoe/config.json",
+      "workspace_path": "/path/to/zoe/workspace",
+      "sessions_path": "/path/to/zoe/sessions",
+      "run_dir": "/path/to/zoe/run",
+      "slot_name": "Zoe Zebra",
+      "app_id": "cli_xxx_zoe",
+      "app_secret": "sec_xxx_zoe",
+      "archived": false,
+      "archived_at": "",
+      "backup_path": "",
+      "skills": [
+        "docx",
+        "feishu-docx-wiki"
+      ],
+      "tool_policy": "default",
+      "memory_mode": "default",
+      "skill_mode": "default"
+    }
+  ]
+}
